@@ -26,13 +26,9 @@
 #include <asoundlib.h>
 
 #include <pulse/sample.h>
-#include <pulse/volume.h>
-#include <pulse/mainloop-api.h>
 #include <pulse/channelmap.h>
 #include <pulse/proplist.h>
-#include <pulse/volume.h>
 
-#include <pulsecore/llist.h>
 #include <pulsecore/rtpoll.h>
 #include <pulsecore/core.h>
 #include <pulsecore/log.h>
@@ -129,7 +125,7 @@ int pa_alsa_recover_from_poll(snd_pcm_t *pcm, int revents);
 pa_rtpoll_item* pa_alsa_build_pollfd(snd_pcm_t *pcm, pa_rtpoll *rtpoll);
 
 snd_pcm_sframes_t pa_alsa_safe_avail(snd_pcm_t *pcm, size_t hwbuf_size, const pa_sample_spec *ss);
-int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_sframes_t *delay, size_t hwbuf_size, const pa_sample_spec *ss);
+int pa_alsa_safe_delay(snd_pcm_t *pcm, snd_pcm_sframes_t *delay, size_t hwbuf_size, const pa_sample_spec *ss, pa_bool_t capture);
 int pa_alsa_safe_mmap_begin(snd_pcm_t *pcm, const snd_pcm_channel_area_t **areas, snd_pcm_uframes_t *offset, snd_pcm_uframes_t *frames, size_t hwbuf_size, const pa_sample_spec *ss);
 
 char *pa_alsa_get_driver_name(int card);
@@ -137,11 +133,17 @@ char *pa_alsa_get_driver_name_by_pcm(snd_pcm_t *pcm);
 
 char *pa_alsa_get_reserve_name(const char *device);
 
+unsigned int *pa_alsa_get_supported_rates(snd_pcm_t *pcm);
+
 pa_bool_t pa_alsa_pcm_is_hw(snd_pcm_t *pcm);
 pa_bool_t pa_alsa_pcm_is_modem(snd_pcm_t *pcm);
 
 const char* pa_alsa_strerror(int errnum);
 
 pa_bool_t pa_alsa_may_tsched(pa_bool_t want);
+
+snd_hctl_elem_t* pa_alsa_find_jack(snd_hctl_t *hctl, const char* jack_name);
+
+snd_mixer_t *pa_alsa_open_mixer(int alsa_card_index, char **ctl_device, snd_hctl_t **hctl);
 
 #endif

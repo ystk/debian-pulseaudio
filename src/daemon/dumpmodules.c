@@ -25,16 +25,15 @@
 #endif
 
 #include <string.h>
-#include <getopt.h>
 #include <stdio.h>
 #include <ltdl.h>
 
 #include <pulse/util.h>
-#include <pulse/i18n.h>
 
-#include <pulsecore/modinfo.h>
 #include <pulsecore/core-util.h>
+#include <pulsecore/i18n.h>
 #include <pulsecore/macro.h>
+#include <pulsecore/modinfo.h>
 
 #include "dumpmodules.h"
 
@@ -90,7 +89,9 @@ static void show_info(const char *name, const char *path, void (*info)(const cha
     }
 }
 
+#ifndef OS_IS_WIN32
 extern const lt_dlsymlist lt_preloaded_symbols[];
+#endif
 
 static int is_preloaded(const char *name) {
     const lt_dlsymlist *l;

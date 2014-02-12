@@ -33,7 +33,6 @@
 #include <pulsecore/source-output.h>
 #include <pulsecore/modargs.h>
 #include <pulsecore/log.h>
-#include <pulsecore/namereg.h>
 
 #include "module-suspend-on-idle-symdef.h"
 
@@ -41,6 +40,7 @@ PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("When a sink/source is idle for too long, suspend it");
 PA_MODULE_VERSION(PACKAGE_VERSION);
 PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_USAGE("timeout=<timeout>");
 
 static const char* const valid_modargs[] = {
     "timeout",
@@ -90,11 +90,13 @@ static void timeout_cb(pa_mainloop_api*a, pa_time_event* e, const struct timeval
     if (d->sink && pa_sink_check_suspend(d->sink) <= 0 && !(d->sink->suspend_cause & PA_SUSPEND_IDLE)) {
         pa_log_info("Sink %s idle for too long, suspending ...", d->sink->name);
         pa_sink_suspend(d->sink, TRUE, PA_SUSPEND_IDLE);
+        pa_core_maybe_vacuum(d->userdata->core);
     }
 
     if (d->source && pa_source_check_suspend(d->source) <= 0 && !(d->source->suspend_cause & PA_SUSPEND_IDLE)) {
         pa_log_info("Source %s idle for too long, suspending ...", d->source->name);
         pa_source_suspend(d->source, TRUE, PA_SUSPEND_IDLE);
+        pa_core_maybe_vacuum(d->userdata->core);
     }
 }
 
@@ -145,8 +147,9 @@ static pa_hook_result_t sink_input_fixate_hook_cb(pa_core *c, pa_sink_input_new_
     pa_assert(data);
     pa_assert(u);
 
-    if (data->flags & PA_SINK_INPUT_START_CORKED)
-        return PA_HOOK_OK;
+    /* We need to resume the audio device here even for
+     * PA_SINK_INPUT_START_CORKED, since we need the device parameters
+     * to be fully available while the stream is set up. */
 
     if ((d = pa_hashmap_get(u->device_infos, data->sink)))
         resume(d);
@@ -160,9 +163,6 @@ static pa_hook_result_t source_output_fixate_hook_cb(pa_core *c, pa_source_outpu
     pa_assert(c);
     pa_assert(data);
     pa_assert(u);
-
-    if (data->flags & PA_SOURCE_OUTPUT_START_CORKED)
-        return PA_HOOK_OK;
 
     if (data->source->monitor_of)
         d = pa_hashmap_get(u->device_infos, data->source->monitor_of);

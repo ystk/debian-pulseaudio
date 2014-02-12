@@ -25,7 +25,6 @@
 #endif
 
 #include <stdio.h>
-#include <math.h>
 
 #include <pulse/xmalloc.h>
 
@@ -53,7 +52,12 @@ PA_MODULE_USAGE(
         "format=<sample format> "
         "rate=<sample rate> "
         "channels=<number of channels> "
-        "channel_map=<channel map>");
+        "channel_map=<channel map> "
+        "sink_input_properties=<proplist> "
+        "source_output_properties=<proplist> "
+        "source_dont_move=<boolean> "
+        "sink_dont_move=<boolean> "
+        "remix=<remix channels?> ");
 
 #define DEFAULT_LATENCY_MSEC 200
 
@@ -102,11 +106,17 @@ struct userdata {
 static const char* const valid_modargs[] = {
     "source",
     "sink",
+    "adjust_time",
     "latency_msec",
     "format",
     "rate",
     "channels",
     "channel_map",
+    "sink_input_properties",
+    "source_output_properties",
+    "source_dont_move",
+    "sink_dont_move",
+    "remix",
     NULL,
 };
 
@@ -126,6 +136,15 @@ static void teardown(struct userdata *u) {
     pa_assert(u);
     pa_assert_ctl_context();
 
+    if (u->asyncmsgq)
+        pa_asyncmsgq_flush(u->asyncmsgq, 0);
+
+    u->adjust_time = 0;
+    if (u->time_event) {
+        u->core->mainloop->time_free(u->time_event);
+        u->time_event = NULL;
+    }
+
     if (u->sink_input)
         pa_sink_input_unlink(u->sink_input);
 
@@ -133,11 +152,13 @@ static void teardown(struct userdata *u) {
         pa_source_output_unlink(u->source_output);
 
     if (u->sink_input) {
+        u->sink_input->parent.process_msg = pa_sink_input_process_msg;
         pa_sink_input_unref(u->sink_input);
         u->sink_input = NULL;
     }
 
     if (u->source_output) {
+        u->source_output->parent.process_msg = pa_source_output_process_msg;
         pa_source_output_unref(u->source_output);
         u->source_output = NULL;
     }
@@ -166,13 +187,13 @@ static void adjust_rates(struct userdata *u) {
 
     buffer_latency = pa_bytes_to_usec(buffer, &u->sink_input->sample_spec);
 
-    pa_log_info("Loopback overall latency is %0.2f ms + %0.2f ms + %0.2f ms = %0.2f ms",
+    pa_log_debug("Loopback overall latency is %0.2f ms + %0.2f ms + %0.2f ms = %0.2f ms",
                 (double) u->latency_snapshot.sink_latency / PA_USEC_PER_MSEC,
                 (double) buffer_latency / PA_USEC_PER_MSEC,
                 (double) u->latency_snapshot.source_latency / PA_USEC_PER_MSEC,
                 ((double) u->latency_snapshot.sink_latency + buffer_latency + u->latency_snapshot.source_latency) / PA_USEC_PER_MSEC);
 
-    pa_log_info("Should buffer %zu bytes, buffered at minimum %zu bytes",
+    pa_log_debug("Should buffer %zu bytes, buffered at minimum %zu bytes",
                 u->latency_snapshot.max_request*2,
                 u->latency_snapshot.min_memblockq_length);
 
@@ -185,9 +206,21 @@ static void adjust_rates(struct userdata *u) {
     else
         new_rate = base_rate + (((u->latency_snapshot.min_memblockq_length - u->latency_snapshot.max_request*2) / fs) *PA_USEC_PER_SEC)/u->adjust_time;
 
-    pa_log_info("Old rate %lu Hz, new rate %lu Hz", (unsigned long) old_rate, (unsigned long) new_rate);
+    if (new_rate < (uint32_t) (base_rate*0.8) || new_rate > (uint32_t) (base_rate*1.25)) {
+        pa_log_warn("Sample rates too different, not adjusting (%u vs. %u).", base_rate, new_rate);
+        new_rate = base_rate;
+    } else {
+        if (base_rate < new_rate + 20 && new_rate < base_rate + 20)
+          new_rate = base_rate;
+        /* Do the adjustment in small steps; 2‰ can be considered inaudible */
+        if (new_rate < (uint32_t) (old_rate*0.998) || new_rate > (uint32_t) (old_rate*1.002)) {
+            pa_log_info("New rate of %u Hz not within 2‰ of %u Hz, forcing smaller adjustment", new_rate, old_rate);
+            new_rate = PA_CLAMP(new_rate, (uint32_t) (old_rate*0.998), (uint32_t) (old_rate*1.002));
+        }
+    }
 
     pa_sink_input_set_rate(u->sink_input, new_rate);
+    pa_log_debug("[%s] Updated sampling rate to %lu Hz.", u->sink_input->sink->name, (unsigned long) new_rate);
 
     pa_core_rttime_restart(u->core, u->time_event, pa_rtclock_now() + u->adjust_time);
 }
@@ -339,6 +372,9 @@ static void source_output_moving_cb(pa_source_output *o, pa_source *dest) {
     const char *n;
     struct userdata *u;
 
+    if (!dest)
+        return;
+
     pa_source_output_assert_ref(o);
     pa_assert_ctl_context();
     pa_assert_se(u = o->userdata);
@@ -382,7 +418,7 @@ static int sink_input_pop_cb(pa_sink_input *i, size_t nbytes, pa_memchunk *chunk
     u->in_pop = FALSE;
 
     if (pa_memblockq_peek(u->memblockq, chunk) < 0) {
-        pa_log_info("Coud not peek into queue");
+        pa_log_info("Could not peek into queue");
         return -1;
     }
 
@@ -412,9 +448,9 @@ static int sink_input_process_msg_cb(pa_msgobject *obj, int code, void *data, in
     switch (code) {
 
         case PA_SINK_INPUT_MESSAGE_GET_LATENCY: {
-             pa_usec_t *r = data;
+            pa_usec_t *r = data;
 
-             pa_sink_input_assert_io_context(u->sink_input);
+            pa_sink_input_assert_io_context(u->sink_input);
 
             *r = pa_bytes_to_usec(pa_memblockq_get_length(u->memblockq), &u->sink_input->sample_spec);
 
@@ -430,7 +466,7 @@ static int sink_input_process_msg_cb(pa_msgobject *obj, int code, void *data, in
             if (PA_SINK_IS_OPENED(u->sink_input->sink->thread_info.state))
                 pa_memblockq_push_align(u->memblockq, chunk);
             else
-                pa_memblockq_flush_write(u->memblockq);
+                pa_memblockq_flush_write(u->memblockq, TRUE);
 
             update_min_memblockq_length(u);
 
@@ -457,7 +493,7 @@ static int sink_input_process_msg_cb(pa_msgobject *obj, int code, void *data, in
             if (PA_SINK_IS_OPENED(u->sink_input->sink->thread_info.state))
                 pa_memblockq_seek(u->memblockq, -offset, PA_SEEK_RELATIVE, TRUE);
             else
-                pa_memblockq_flush_write(u->memblockq);
+                pa_memblockq_flush_write(u->memblockq, TRUE);
 
             u->recv_counter -= offset;
 
@@ -493,7 +529,8 @@ static int sink_input_process_msg_cb(pa_msgobject *obj, int code, void *data, in
 
             pa_assert_ctl_context();
 
-            adjust_rates(u);
+            if (u->adjust_time > 0)
+                adjust_rates(u);
             return 0;
         }
     }
@@ -576,6 +613,9 @@ static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
     pa_proplist *p;
     const char *n;
 
+    if (!dest)
+        return;
+
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert_se(u = i->userdata);
@@ -609,14 +649,17 @@ int pa__init(pa_module *m) {
     struct userdata *u;
     pa_sink *sink;
     pa_sink_input_new_data sink_input_data;
+    pa_bool_t sink_dont_move;
     pa_source *source;
     pa_source_output_new_data source_output_data;
+    pa_bool_t source_dont_move;
     uint32_t latency_msec;
     pa_sample_spec ss;
     pa_channel_map map;
     pa_memchunk silence;
     uint32_t adjust_time_sec;
     const char *n;
+    pa_bool_t remix = TRUE;
 
     pa_assert(m);
 
@@ -632,6 +675,11 @@ int pa__init(pa_module *m) {
 
     if (!(sink = pa_namereg_get(m->core, pa_modargs_get_value(ma, "sink", NULL), PA_NAMEREG_SINK))) {
         pa_log("No such sink.");
+        goto fail;
+    }
+
+    if (pa_modargs_get_value_boolean(ma, "remix", &remix) < 0) {
+        pa_log("Invalid boolean remix parameter");
         goto fail;
     }
 
@@ -667,16 +715,37 @@ int pa__init(pa_module *m) {
     pa_sink_input_new_data_init(&sink_input_data);
     sink_input_data.driver = __FILE__;
     sink_input_data.module = m;
-    sink_input_data.sink = sink;
+    pa_sink_input_new_data_set_sink(&sink_input_data, sink, FALSE);
 
-    pa_proplist_setf(sink_input_data.proplist, PA_PROP_MEDIA_NAME, "Loopback of %s",
-                     pa_strnull(pa_proplist_gets(source->proplist, PA_PROP_DEVICE_DESCRIPTION)));
-    if ((n = pa_proplist_gets(source->proplist, PA_PROP_DEVICE_ICON_NAME)))
+    if (pa_modargs_get_proplist(ma, "sink_input_properties", sink_input_data.proplist, PA_UPDATE_REPLACE) < 0) {
+        pa_log("Failed to parse the sink_input_properties value.");
+        pa_sink_input_new_data_done(&sink_input_data);
+        goto fail;
+    }
+
+    if (!pa_proplist_contains(sink_input_data.proplist, PA_PROP_MEDIA_NAME))
+        pa_proplist_setf(sink_input_data.proplist, PA_PROP_MEDIA_NAME, "Loopback from %s",
+                         pa_strnull(pa_proplist_gets(source->proplist, PA_PROP_DEVICE_DESCRIPTION)));
+
+    if (!pa_proplist_contains(sink_input_data.proplist, PA_PROP_MEDIA_ROLE))
+        pa_proplist_sets(sink_input_data.proplist, PA_PROP_MEDIA_ROLE, "abstract");
+
+    if (!pa_proplist_contains(sink_input_data.proplist, PA_PROP_MEDIA_ICON_NAME)
+            && (n = pa_proplist_gets(source->proplist, PA_PROP_DEVICE_ICON_NAME)))
         pa_proplist_sets(sink_input_data.proplist, PA_PROP_MEDIA_ICON_NAME, n);
-    pa_proplist_sets(sink_input_data.proplist, PA_PROP_MEDIA_ROLE, "abstract");
+
     pa_sink_input_new_data_set_sample_spec(&sink_input_data, &ss);
     pa_sink_input_new_data_set_channel_map(&sink_input_data, &map);
-    sink_input_data.flags = PA_SINK_INPUT_VARIABLE_RATE;
+    sink_input_data.flags = PA_SINK_INPUT_VARIABLE_RATE | (remix ? 0 : PA_SINK_INPUT_NO_REMIX);
+
+    sink_dont_move = FALSE;
+    if (pa_modargs_get_value_boolean(ma, "sink_dont_move", &sink_dont_move) < 0) {
+        pa_log("sink_dont_move= expects a boolean argument.");
+        goto fail;
+    }
+
+    if (sink_dont_move)
+        sink_input_data.flags |= PA_SINK_INPUT_DONT_MOVE;
 
     pa_sink_input_new(&u->sink_input, m->core, &sink_input_data);
     pa_sink_input_new_data_done(&sink_input_data);
@@ -701,14 +770,37 @@ int pa__init(pa_module *m) {
     pa_source_output_new_data_init(&source_output_data);
     source_output_data.driver = __FILE__;
     source_output_data.module = m;
-    source_output_data.source = source;
-    pa_proplist_setf(source_output_data.proplist, PA_PROP_MEDIA_NAME, "Loopback to %s",
-                     pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_DEVICE_DESCRIPTION)));
-    if ((n = pa_proplist_gets(sink->proplist, PA_PROP_DEVICE_ICON_NAME)))
+    pa_source_output_new_data_set_source(&source_output_data, source, FALSE);
+
+    if (pa_modargs_get_proplist(ma, "source_output_properties", source_output_data.proplist, PA_UPDATE_REPLACE) < 0) {
+        pa_log("Failed to parse the source_output_properties value.");
+        pa_source_output_new_data_done(&source_output_data);
+        goto fail;
+    }
+
+    if (!pa_proplist_contains(source_output_data.proplist, PA_PROP_MEDIA_NAME))
+        pa_proplist_setf(source_output_data.proplist, PA_PROP_MEDIA_NAME, "Loopback to %s",
+                         pa_strnull(pa_proplist_gets(sink->proplist, PA_PROP_DEVICE_DESCRIPTION)));
+
+    if (!pa_proplist_contains(source_output_data.proplist, PA_PROP_MEDIA_ROLE))
+        pa_proplist_sets(source_output_data.proplist, PA_PROP_MEDIA_ROLE, "abstract");
+
+    if (!pa_proplist_contains(source_output_data.proplist, PA_PROP_MEDIA_ICON_NAME)
+            && (n = pa_proplist_gets(sink->proplist, PA_PROP_DEVICE_ICON_NAME)))
         pa_proplist_sets(source_output_data.proplist, PA_PROP_MEDIA_ICON_NAME, n);
-    pa_proplist_sets(source_output_data.proplist, PA_PROP_MEDIA_ROLE, "abstract");
+
     pa_source_output_new_data_set_sample_spec(&source_output_data, &ss);
-    pa_sink_input_new_data_set_channel_map(&sink_input_data, &map);
+    pa_source_output_new_data_set_channel_map(&source_output_data, &map);
+    source_output_data.flags = (remix ? 0 : PA_SOURCE_OUTPUT_NO_REMIX);
+
+    source_dont_move = FALSE;
+    if (pa_modargs_get_value_boolean(ma, "source_dont_move", &source_dont_move) < 0) {
+        pa_log("source_dont_move= expects a boolean argument.");
+        goto fail;
+    }
+
+    if (source_dont_move)
+        source_output_data.flags |= PA_SOURCE_OUTPUT_DONT_MOVE;
 
     pa_source_output_new(&u->source_output, m->core, &source_output_data);
     pa_source_output_new_data_done(&source_output_data);
@@ -731,10 +823,11 @@ int pa__init(pa_module *m) {
 
     pa_sink_input_get_silence(u->sink_input, &silence);
     u->memblockq = pa_memblockq_new(
+            "module-loopback memblockq",
             0,                      /* idx */
             MEMBLOCKQ_MAXLENGTH,    /* maxlength */
             MEMBLOCKQ_MAXLENGTH,    /* tlength */
-            pa_frame_size(&ss),     /* base */
+            &ss,                    /* sample_spec */
             0,                      /* prebuf */
             0,                      /* minreq */
             0,                      /* maxrewind */
@@ -776,9 +869,6 @@ void pa__done(pa_module*m) {
 
     if (u->asyncmsgq)
         pa_asyncmsgq_unref(u->asyncmsgq);
-
-    if (u->time_event)
-        u->core->mainloop->time_free(u->time_event);
 
     pa_xfree(u);
 }

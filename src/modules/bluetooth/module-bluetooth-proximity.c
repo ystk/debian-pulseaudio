@@ -59,7 +59,6 @@ PA_MODULE_USAGE(
 
 static const char* const valid_modargs[] = {
     "sink",
-    "rssi",
     "hci",
     NULL,
 };
@@ -92,7 +91,8 @@ struct userdata {
     unsigned n_found;
     unsigned n_unknown;
 
-    pa_bool_t muted;
+    pa_bool_t muted:1;
+    pa_bool_t filter_added:1;
 };
 
 static void update_volume(struct userdata *u) {
@@ -325,7 +325,7 @@ finish:
     return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 }
 
-static int add_matches(struct userdata *u, pa_bool_t add) {
+static int update_matches(struct userdata *u, pa_bool_t add) {
     char *filter1, *filter2;
     DBusError e;
     int r = -1;
@@ -344,7 +344,7 @@ static int add_matches(struct userdata *u, pa_bool_t add) {
             goto finish;
         }
     } else
-        dbus_bus_remove_match(pa_dbus_connection_get(u->dbus_connection), filter1, &e);
+        dbus_bus_remove_match(pa_dbus_connection_get(u->dbus_connection), filter1, NULL);
 
 
     if (add) {
@@ -352,15 +352,16 @@ static int add_matches(struct userdata *u, pa_bool_t add) {
 
         if (dbus_error_is_set(&e)) {
             pa_log("dbus_bus_add_match(%s) failed: %s", filter2, e.message);
-            dbus_bus_remove_match(pa_dbus_connection_get(u->dbus_connection), filter2, &e);
+            dbus_bus_remove_match(pa_dbus_connection_get(u->dbus_connection), filter1, NULL);
             goto finish;
         }
     } else
-        dbus_bus_remove_match(pa_dbus_connection_get(u->dbus_connection), filter2, &e);
+        dbus_bus_remove_match(pa_dbus_connection_get(u->dbus_connection), filter2, NULL);
 
-    if (add)
+    if (add) {
         pa_assert_se(dbus_connection_add_filter(pa_dbus_connection_get(u->dbus_connection), filter_func, u, NULL));
-    else
+        u->filter_added = TRUE;
+    } else if (u->filter_added)
         dbus_connection_remove_filter(pa_dbus_connection_get(u->dbus_connection), filter_func, u);
 
     r = 0;
@@ -393,9 +394,6 @@ int pa__init(pa_module*m) {
     u->sink_name = pa_xstrdup(pa_modargs_get_value(ma, "sink", NULL));
     u->hci = pa_xstrdup(pa_modargs_get_value(ma, "hci", DEFAULT_HCI));
     u->hci_path = pa_sprintf_malloc("/org/bluez/%s", u->hci);
-    u->n_found = u->n_unknown = 0;
-    u->muted = FALSE;
-
     u->bondings = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
 
     if (!(u->dbus_connection = pa_dbus_bus_get(m->core, DBUS_BUS_SYSTEM, &e))) {
@@ -403,7 +401,7 @@ int pa__init(pa_module*m) {
         goto fail;
     }
 
-    if (add_matches(u, TRUE) < 0)
+    if (update_matches(u, TRUE) < 0)
         goto fail;
 
     pa_assert_se(msg = dbus_message_new_method_call("org.bluez", u->hci_path, "org.bluez.Adapter", "ListBondings"));
@@ -478,7 +476,7 @@ void pa__done(pa_module*m) {
     }
 
     if (u->dbus_connection) {
-        add_matches(u, FALSE);
+        update_matches(u, FALSE);
         pa_dbus_connection_unref(u->dbus_connection);
     }
 

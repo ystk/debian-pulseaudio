@@ -1,11 +1,263 @@
-pulseaudio (0.9.21-3+squeeze1) stable; urgency=low
+pulseaudio (2.0-6.1) unstable; urgency=low
 
-  * Team upload.
-  * Fix pacmd hanging in poll() when reading from stdin very early.
-    Patch extracted from upstream by Alexander Wuerstlein <arw@arw.name>
-   (Closes: #574589)
+  * Non-maintainer upload.
 
- -- Reinhard Tartler <siretart@tauware.de>  Mon, 14 Feb 2011 14:28:33 +0100
+  [ Steven Chamberlain ]
+  * Import patch from FreeBSD to disable threads locking and
+    synchronisation on kFreeBSD. This fixes the opening of Gnome 3
+    sessions on these architectures. Closes: #705435
+
+ -- Didier Raboud <odyx@debian.org>  Wed, 24 Apr 2013 21:29:43 +0200
+
+pulseaudio (2.0-6) unstable; urgency=low
+
+  * debian/rules: use xz compression for binary packages. (Patch by Ansgar
+    Burchardt) (Closes: #683905)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 11 Aug 2012 16:43:56 +0200
+
+pulseaudio (2.0-5) unstable; urgency=low
+
+  * debian/control: Use linux-any where applicable instead of specifying
+    architectures by hand. (Closes: #682738)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Thu, 09 Aug 2012 13:20:06 +0200
+
+pulseaudio (2.0-4) unstable; urgency=low
+  * debian/patches/remove-analog-mono.patch:
+    - Added. Remove analog-output-lfe-on-mono mixer path, although in principle
+      Ac '97 hardware has a seperate mono LFE pin nothing seems to use it. To
+      make matters worse it does confused pulseaudios port selection slightly
+      which causes audio in virtualbox not to work out of the box
+      (Closes: #673847)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 21 Jul 2012 18:00:28 +0200
+
+pulseaudio (2.0-3) unstable; urgency=low
+
+  [ Martin-Éric Racine ]
+  * ChangeLog cleanup.
+  * rules: fix the update-rc.d arguments to match our LSB header.
+
+  [ Sjoerd Simons ]
+  * Add webrtc echo cancellation support
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 19 May 2012 22:05:13 +0200
+
+pulseaudio (2.0-2) unstable; urgency=low
+
+  [ Martin-Éric Racine ]
+  * Added myself to Uploaders.
+  * Added patch 0001_man_page_typos.patch
+  * control:
+    - pulseaudio: don't Recommends pulseaudio-esound-compat (Closes: #671304).
+    - Lintian: fixed duplicate short descriptions for -dbg.
+    - Lintian: change versioned Conflicts to Breaks.
+  * rules: correctly generate versioned library paths.
+  * pulseaudio.init:
+    - LSB: NetworkManager to network-manager.
+    - LSB: added missing Stop levels 0 and 6.
+    - Added --disallow-exit option (Closes: #671470).
+  * pulseaudio-esound-compat.links: added man page link for esd.1.gz 
+  * watch: updated to point to FreeDesktop.org XZ tarball archive.
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 18 May 2012 20:54:08 +0200
+
+pulseaudio (2.0-1) unstable; urgency=low
+
+  * New upstream release (2.0)
+  * debian/patches: Drop all patches, all merged upstream
+  * pulseaudio: Add new modules: module-switch-on-port-available,
+    module-virtual-surround-sink
+  * pulseaudio: Add new manpage: man 5 pulse-cli-syntax
+  * pulseaudio: Build module-systemd-login on linux
+  * debian/pulse-alsa.conf: Fix name hint definition  (Closes: 671471).
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 13 May 2012 17:07:15 +0200
+
+pulseaudio (1.1-3.2) unstable; urgency=low
+
+  * Non-maintainer upload.
+  * Apply upstream patches to fix build on hurd-i386 (Closes: 573339).
+
+ -- Samuel Thibault <sthibault@debian.org>  Wed, 25 Apr 2012 12:33:21 +0200
+
+pulseaudio (1.1-3) unstable; urgency=low
+
+  * Tighten dependencies for packages that uses the internal helper library
+    (Closes: 651716)
+  * Move libpulsecommon and libpulsedsp to a pkglib (Closes: 651717)
+  * Fix svolume compilation on arm (Closes: 657117)
+  * Move the alsa pulse.conf file to /usr/share/alsa/alsa.conf.d to follow the
+    alsa-lib 1.0.25 changes
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 19 Feb 2012 13:54:55 +0100
+
+pulseaudio (1.1-2) unstable; urgency=low
+
+  * debian/libpulse0.symbols: Tighten depends for packages using the private
+    libpulsecommon library (Closes: 647236)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 25 Nov 2011 22:04:51 +0100
+
+pulseaudio (1.1-1) unstable; urgency=low
+
+  * New upstream bugfix release
+  * debian/libpulse0.symbols: Soname of internal libpulsecommon library bumped
+  * debian/control: Update standards version
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 23 Oct 2011 11:08:01 +0200
+
+pulseaudio (1.0-4) unstable; urgency=low
+
+  * debian/control: Don't depend on libasound2-plugins on kfreebsd
+    and the hurd (Closes: #643966)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 01 Oct 2011 13:15:54 +0100
+
+pulseaudio (1.0-3) unstable; urgency=low
+
+  * debian/libpulse-mainloop-glib0.symbols: Actually fix the naming...
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Thu, 29 Sep 2011 11:21:32 +0100
+
+pulseaudio (1.0-2) unstable; urgency=low
+
+  * debian/libpulse-mainloop-glib0.symbols:
+    + Fix the naming of the package providing this library (Closes: #639892)
+  * debian/rules: Install modules in /usr/lib/pulse-1.0
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Wed, 28 Sep 2011 07:25:08 +0100
+
+pulseaudio (1.0-1) unstable; urgency=low
+
+  * New upstream release
+  * debian/source/options: Switch to xz compression
+  * debian/gbp.conf: Switch to xz compression
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Wed, 28 Sep 2011 00:52:27 +0100
+
+pulseaudio (0.99.4-1) experimental; urgency=low
+
+  * New upstream release
+  * debian/libpulse0.symbols: Updated
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 16 Sep 2011 21:23:47 +0100
+
+pulseaudio (0.99.2-2) experimental; urgency=low
+
+  * Fix build on kfreebsd architectures (Closes: 637785)
+    - Don't install /usr/share/pulseaudio
+    - Ignore symbols that don't exist on kfreebsd
+  * debian/rules: Adopt the arm{,el} build hack to the new version. Fixes build
+    on arm{el,}
+  * debian/control: Remove CJ from Uploaders (Closes: 636428)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 28 Aug 2011 18:25:10 +0100
+
+pulseaudio (0.99.2-1) experimental; urgency=low
+
+  * New upstream release
+  * debian/control: Bump libjack-dev b-d to 0.117.0
+  * debian/libpulse0.symbols: Updated
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Tue, 23 Aug 2011 20:51:25 +0200
+
+pulseaudio (0.99.1-1) experimental; urgency=low
+
+  * New upstream test release
+  * d/p/0001-Work-around-some-platforms-not-having-O_CLOEXEC.patch:
+    + Removed, fixed upstream
+  * d/p/0003-Explicitely-link-pax11publish-to-libdbus.patch
+    + Removed, fixed upstream
+  * renamed s/p/0002-In-KDE-only-start-pulseaudio-from-the-KDE-specific-d.patch
+    to 0001-Work-around-some-platforms-not-having-O_CLOEXEC.patch
+  * Remove pabrowse packages
+  * d/p/0001-In-KDE-only-start-pulseaudio-from-the-KDE-specific-d.patch
+    + Dropped, shouldn't be needed, the start-pulseaudio-kde just needs to load
+      an extra module
+  * Synchronize with Ubuntu (0.99.1 packaging):
+    + Add manpages for start-pulseaudio-{kde,x11}
+    + Update copyright file
+    + Update pulseaudio.shlibs
+    + Install jackdbus-detect
+    + Add symbols file for libpulse0
+    + Add symbols file for libpulse-mainloop-glib0.symbols
+    + Use upstream esdcompat manpage
+    + Update pulseaudio.install for 0.99.1
+    + Install vapi files
+    + Add LDFLAGS += -Wl,--no-as-needed
+    + Update pulseaudio.default documentation.
+    + Small tweaks to the init script
+    + Automatically enable the pulse alsa modules if pulse is running
+    + Tweak dependencies a bit
+    + build for multi-arch
+  * debian/README.Debian, remove redudant comments
+  * debian/control: switch to tdb as the backend database
+  * debian/control: Enable orc support
+  * debian/control: Add libfftw3-dev to b-d for the equalizer module
+  * debian/pulseaudio.install: Install module-equalizer-sink
+  * debian/{control,rules}: No longer build pulseaudio-module-hal
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 13 Aug 2011 14:21:02 +0200
+
+pulseaudio (0.9.23-1) unstable; urgency=low
+
+  [ Daniel T Chen ]
+  * debian/control:
+    + Fix typo in long description of pulseaudio-module-x11, thanks to
+      Sam Morris (Closes: #500038)
+    + Clarify long description of pulseaudio-esound-compat. Many apps
+      still in use require functionality from this package
+      (Closes: #601725)
+  * debian/libpulse-dev.examples: Apply patch from Mario Lang to include
+    simple examples in the dev package. Thanks! (Closes: #561258)
+  * debian/patches/
+    0003-Mention-speex-and-libsamplerate-in-pulse-daemon.conf.patch:
+    + Mention speex in the resampling section. Currently the Resampler
+      section of "Programming with Speex (the libspeex API)" contains
+      the relevant information (Closes: #541206)
+  * debian/patches/0004-Fix-FTBFS-with-xcb-util-0.3.8.patch:
+    + Apply patch from Arnaud Fontaine <arnau@debian.org> and the
+      suggestion from Alessandro Ghedini <al3xbio@gmail.com> to fix
+      FTBFS with xcb-util 0.3.8. Thanks, Arnaud and Alessandro!
+      (Closes: #624847)
+  * debian/pulseaudio-utils.links: Also add pamon(1), parec(1), and
+    parecord(1) (Closes: #599696)
+  * debian/README.Debian: Clarify historical pulse-rt use and document
+    current recommendation of RealtimeKit (Closes: #548363)
+
+  [ Sjoerd Simons ]
+  * New upstream release
+  * d/p/0003-Mention-speex-and-libsamplerate-in-pulse-daemon.conf.patch
+    + Removed, fixed upstream
+  * d/p/0004-Fix-FTBFS-with-xcb-util-0.3.8.patch
+    + Removed, fixed upstream
+  * Update to 0.9.23 versioning:
+    debian/libpulse0.shlibs
+    debian/pulseaudio.shlibs
+    debian/rules
+  * Switch to 3.0 (quilt) format
+  * debian/control: Use dh-autoreconf
+  * debian/patches/+0003-Explicitely-link-pax11publish-to-libdbus.patch:
+    + Added. Fix build with binutils-gold (Closes: #556124)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Mon, 25 Jul 2011 23:05:29 +0100
+
+pulseaudio (0.9.22-1) experimental; urgency=low
+
+  * New upstream release
+  * debian/patches/0002-CVE-2009-1299.patch:
+    + Dropped, fixed upstream
+  * debian/patches/0003-Re-bootstrap.patch
+    + Dropped, not needed anymore
+  * debian/rules: Stop using -g0 on mips{,el} the toolchain has been fixed
+  * debian/rules, debian/control: Update build-depends and force building
+    with X11
+  * debian/control: Suggest rtkit
+  * debian/control: Prune unneeded depends of libpulse-dev
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 05 Dec 2010 12:01:37 +0000
 
 pulseaudio (0.9.21-3) unstable; urgency=low
 

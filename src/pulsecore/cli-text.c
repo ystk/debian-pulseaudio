@@ -23,8 +23,6 @@
 #include <config.h>
 #endif
 
-#include <string.h>
-
 #include <pulse/volume.h>
 #include <pulse/xmalloc.h>
 #include <pulse/timeval.h>
@@ -36,7 +34,6 @@
 #include <pulsecore/sink-input.h>
 #include <pulsecore/source-output.h>
 #include <pulsecore/strbuf.h>
-#include <pulsecore/sample-util.h>
 #include <pulsecore/core-scache.h>
 #include <pulsecore/macro.h>
 #include <pulsecore/core-util.h>
@@ -105,6 +102,37 @@ char *pa_client_list_to_string(pa_core *c) {
     return pa_strbuf_tostring_free(s);
 }
 
+static const char *port_available_to_string(pa_port_available_t a) {
+    switch (a) {
+        case PA_PORT_AVAILABLE_UNKNOWN:
+            return "unknown";
+        case PA_PORT_AVAILABLE_NO:
+            return "no";
+        case PA_PORT_AVAILABLE_YES:
+            return "yes";
+        default:
+            return "invalid"; /* Should never happen! */
+    }
+}
+
+static void append_port_list(pa_strbuf *s, pa_hashmap *ports)
+{
+    pa_device_port *p;
+    void *state;
+
+    if (!ports)
+        return;
+
+    pa_strbuf_puts(s, "\tports:\n");
+    PA_HASHMAP_FOREACH(p, ports, state) {
+        char *t = pa_proplist_to_string_sep(p->proplist, "\n\t\t\t\t");
+        pa_strbuf_printf(s, "\t\t%s: %s (priority %u, available: %s)\n",
+            p->name, p->description, p->priority, port_available_to_string(p->available));
+        pa_strbuf_printf(s, "\t\t\tproperties:\n\t\t\t\t%s\n", t);
+        pa_xfree(t);
+    }
+}
+
 char *pa_card_list_to_string(pa_core *c) {
     pa_strbuf *s;
     pa_card *card;
@@ -163,6 +191,8 @@ char *pa_card_list_to_string(pa_core *c) {
             for (source = pa_idxset_first(card->sources, &sidx); source; source = pa_idxset_next(card->sources, &sidx))
                 pa_strbuf_printf(s, "\t\t%s/#%u: %s\n", source->name, source->index, pa_strna(pa_proplist_gets(source->proplist, PA_PROP_DEVICE_DESCRIPTION)));
         }
+
+        append_port_list(s, card->ports);
     }
 
     return pa_strbuf_tostring_free(s);
@@ -309,15 +339,7 @@ char *pa_sink_list_to_string(pa_core *c) {
         pa_strbuf_printf(s, "\tproperties:\n\t\t%s\n", t);
         pa_xfree(t);
 
-        if (sink->ports) {
-            pa_device_port *p;
-            void *state;
-
-            pa_strbuf_puts(s, "\tports:\n");
-            PA_HASHMAP_FOREACH(p, sink->ports, state)
-                pa_strbuf_printf(s, "\t\t%s: %s (priority %u)\n", p->name, p->description, p->priority);
-        }
-
+        append_port_list(s, sink->ports);
 
         if (sink->active_port)
             pa_strbuf_printf(
@@ -432,14 +454,7 @@ char *pa_source_list_to_string(pa_core *c) {
         pa_strbuf_printf(s, "\tproperties:\n\t\t%s\n", t);
         pa_xfree(t);
 
-        if (source->ports) {
-            pa_device_port *p;
-            void *state;
-
-            pa_strbuf_puts(s, "\tports:\n");
-            PA_HASHMAP_FOREACH(p, source->ports, state)
-                pa_strbuf_printf(s, "\t\t%s: %s (priority %u)\n", p->name, p->description, p->priority);
-        }
+        append_port_list(s, source->ports);
 
         if (source->active_port)
             pa_strbuf_printf(
@@ -469,9 +484,11 @@ char *pa_source_output_list_to_string(pa_core *c) {
     pa_strbuf_printf(s, "%u source outputs(s) available.\n", pa_idxset_size(c->source_outputs));
 
     for (o = pa_idxset_first(c->source_outputs, &idx); o; o = pa_idxset_next(c->source_outputs, &idx)) {
-        char ss[PA_SAMPLE_SPEC_SNPRINT_MAX], cm[PA_CHANNEL_MAP_SNPRINT_MAX], *t, clt[28];
+        char ss[PA_SAMPLE_SPEC_SNPRINT_MAX], cvdb[PA_SW_CVOLUME_SNPRINT_DB_MAX], cv[PA_CVOLUME_SNPRINT_MAX], cm[PA_CHANNEL_MAP_SNPRINT_MAX], *t, clt[28];
         pa_usec_t cl;
         const char *cmn;
+        pa_cvolume v;
+        char *volume_str = NULL;
 
         cmn = pa_channel_map_to_pretty_name(&o->channel_map);
 
@@ -482,6 +499,16 @@ char *pa_source_output_list_to_string(pa_core *c) {
 
         pa_assert(o->source);
 
+        if (pa_source_output_is_volume_readable(o)) {
+            pa_source_output_get_volume(o, &v, TRUE);
+            volume_str = pa_sprintf_malloc("%s\n\t        %s\n\t        balance %0.2f",
+                                           pa_cvolume_snprint(cv, sizeof(cv), &v),
+                                           pa_sw_cvolume_snprint_dB(cvdb, sizeof(cvdb), &v),
+                                           pa_cvolume_get_balance(&v, &o->channel_map));
+        } else
+            volume_str = pa_xstrdup("n/a");
+
+
         pa_strbuf_printf(
             s,
             "    index: %u\n"
@@ -489,6 +516,8 @@ char *pa_source_output_list_to_string(pa_core *c) {
             "\tflags: %s%s%s%s%s%s%s%s%s%s%s\n"
             "\tstate: %s\n"
             "\tsource: %u <%s>\n"
+            "\tvolume: %s\n"
+            "\tmuted: %s\n"
             "\tcurrent latency: %0.2f ms\n"
             "\trequested latency: %s\n"
             "\tsample spec: %s\n"
@@ -509,6 +538,8 @@ char *pa_source_output_list_to_string(pa_core *c) {
             o->flags & PA_SOURCE_OUTPUT_KILL_ON_SUSPEND ? "KILL_ON_SUSPEND " : "",
             state_table[pa_source_output_get_state(o)],
             o->source->index, o->source->name,
+            volume_str,
+            pa_yes_no(pa_source_output_get_mute(o)),
             (double) pa_source_output_get_latency(o, NULL) / PA_USEC_PER_MSEC,
             clt,
             pa_sample_spec_snprint(ss, sizeof(ss), &o->sample_spec),
@@ -516,6 +547,9 @@ char *pa_source_output_list_to_string(pa_core *c) {
             cmn ? "\n\t             " : "",
             cmn ? cmn : "",
             pa_resample_method_to_string(pa_source_output_get_resample_method(o)));
+
+        pa_xfree(volume_str);
+
         if (o->module)
             pa_strbuf_printf(s, "\towner module: %u\n", o->module->index);
         if (o->client)
@@ -553,8 +587,7 @@ char *pa_sink_input_list_to_string(pa_core *c) {
         pa_usec_t cl;
         const char *cmn;
         pa_cvolume v;
-
-        pa_sink_input_get_volume(i, &v, TRUE);
+        char *volume_str = NULL;
 
         cmn = pa_channel_map_to_pretty_name(&i->channel_map);
 
@@ -565,6 +598,15 @@ char *pa_sink_input_list_to_string(pa_core *c) {
 
         pa_assert(i->sink);
 
+        if (pa_sink_input_is_volume_readable(i)) {
+            pa_sink_input_get_volume(i, &v, TRUE);
+            volume_str = pa_sprintf_malloc("%s\n\t        %s\n\t        balance %0.2f",
+                                           pa_cvolume_snprint(cv, sizeof(cv), &v),
+                                           pa_sw_cvolume_snprint_dB(cvdb, sizeof(cvdb), &v),
+                                           pa_cvolume_get_balance(&v, &i->channel_map));
+        } else
+            volume_str = pa_xstrdup("n/a");
+
         pa_strbuf_printf(
             s,
             "    index: %u\n"
@@ -573,8 +615,6 @@ char *pa_sink_input_list_to_string(pa_core *c) {
             "\tstate: %s\n"
             "\tsink: %u <%s>\n"
             "\tvolume: %s\n"
-            "\t        %s\n"
-            "\t        balance %0.2f\n"
             "\tmuted: %s\n"
             "\tcurrent latency: %0.2f ms\n"
             "\trequested latency: %s\n"
@@ -596,9 +636,7 @@ char *pa_sink_input_list_to_string(pa_core *c) {
             i->flags & PA_SINK_INPUT_KILL_ON_SUSPEND ? "KILL_ON_SUSPEND " : "",
             state_table[pa_sink_input_get_state(i)],
             i->sink->index, i->sink->name,
-            pa_cvolume_snprint(cv, sizeof(cv), &v),
-            pa_sw_cvolume_snprint_dB(cvdb, sizeof(cvdb), &v),
-            pa_cvolume_get_balance(&v, &i->channel_map),
+            volume_str,
             pa_yes_no(pa_sink_input_get_mute(i)),
             (double) pa_sink_input_get_latency(i, NULL) / PA_USEC_PER_MSEC,
             clt,
@@ -607,6 +645,8 @@ char *pa_sink_input_list_to_string(pa_core *c) {
             cmn ? "\n\t             " : "",
             cmn ? cmn : "",
             pa_resample_method_to_string(pa_sink_input_get_resample_method(i)));
+
+        pa_xfree(volume_str);
 
         if (i->module)
             pa_strbuf_printf(s, "\tmodule: %u\n", i->module->index);

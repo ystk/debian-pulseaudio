@@ -37,9 +37,9 @@
  *
  * The simple API is designed for applications with very basic sound
  * playback or capture needs. It can only support a single stream per
- * connection and has no handling of complex features like events, channel
- * mappings and volume control. It is, however, very simple to use and
- * quite sufficent for many programs.
+ * connection and has no support for handling of complex features like
+ * events, channel mappings and volume control. It is, however, very simple
+ * to use and quite sufficient for many programs.
  *
  * \section conn_sec Connecting
  *
@@ -73,7 +73,7 @@
  *
  * Once the connection is established to the server, data can start flowing.
  * Using the connection is very similar to the normal read() and write()
- * system calls. The main difference is that they're call pa_simple_read()
+ * system calls. The main difference is that they're called pa_simple_read()
  * and pa_simple_write(). Note that these operations always block.
  *
  * \section ctrl_sec Buffer control
@@ -82,8 +82,8 @@
  *
  * \li pa_simple_drain() - Will wait for all sent data to finish playing.
  * \li pa_simple_flush() - Will throw away all data currently in buffers.
- * \li pa_simple_get_playback_latency() - Will return the total latency of
- *                                        the playback pipeline.
+ * \li pa_simple_get_latency() - Will return the total latency of
+ *                               the playback pipeline.
  *
  * \section cleanup_sec Cleanup
  *
@@ -98,7 +98,10 @@
 /** \file
  * A simple but limited synchronous playback and recording
  * API. This is a synchronous, simplified wrapper around the standard
- * asynchronous API. */
+ * asynchronous API.
+ *
+ * See also \subpage simple
+ */
 
 /** \example pacat-simple.c
  * A simple playback tool using the simple API */
@@ -112,35 +115,35 @@ PA_C_DECL_BEGIN
  * An opaque simple connection object */
 typedef struct pa_simple pa_simple;
 
-/** Create a new connection to the server */
+/** Create a new connection to the server. */
 pa_simple* pa_simple_new(
     const char *server,                 /**< Server name, or NULL for default */
     const char *name,                   /**< A descriptive name for this client (application name, ...) */
     pa_stream_direction_t dir,          /**< Open this stream for recording or playback? */
     const char *dev,                    /**< Sink (resp. source) name, or NULL for default */
-    const char *stream_name,            /**< A descriptive name for this client (application name, song title, ...) */
+    const char *stream_name,            /**< A descriptive name for this stream (application name, song title, ...) */
     const pa_sample_spec *ss,           /**< The sample type to use */
     const pa_channel_map *map,          /**< The channel map to use, or NULL for default */
     const pa_buffer_attr *attr,         /**< Buffering attributes, or NULL for default */
     int *error                          /**< A pointer where the error code is stored when the routine returns NULL. It is OK to pass NULL here. */
     );
 
-/** Close and free the connection to the server. The connection objects becomes invalid when this is called. */
+/** Close and free the connection to the server. The connection object becomes invalid when this is called. */
 void pa_simple_free(pa_simple *s);
 
-/** Write some data to the server */
-int pa_simple_write(pa_simple *s, const void*data, size_t bytes, int *error);
+/** Write some data to the server. */
+int pa_simple_write(pa_simple *s, const void *data, size_t bytes, int *error);
 
-/** Wait until all data already written is played by the daemon */
+/** Wait until all data already written is played by the daemon. */
 int pa_simple_drain(pa_simple *s, int *error);
 
-/** Read some data from the server */
-int pa_simple_read(pa_simple *s, void*data, size_t bytes, int *error);
+/** Read some data from the server. */
+int pa_simple_read(pa_simple *s, void *data, size_t bytes, int *error);
 
 /** Return the playback latency. */
 pa_usec_t pa_simple_get_latency(pa_simple *s, int *error);
 
-/** Flush the playback buffer. */
+/** Flush the playback buffer. This discards any audio in the buffer. */
 int pa_simple_flush(pa_simple *s, int *error);
 
 PA_C_DECL_END

@@ -28,6 +28,9 @@
 #include <pulse/gccmacro.h>
 #include <pulse/version.h>
 
+/** \file
+ * Property list constants and functions */
+
 PA_C_DECL_BEGIN
 
 /** For streams: localized media name, formatted as UTF-8. e.g. "Guns'N'Roses: Civil War".*/
@@ -59,8 +62,17 @@ PA_C_DECL_BEGIN
 /** For streams: an XDG icon name for the media. e.g. "audio-x-mp3" */
 #define PA_PROP_MEDIA_ICON_NAME                "media.icon_name"
 
-/** For streams: logic role of this media. One of the strings "video", "music", "game", "event", "phone", "animation", "production", "a11y" */
+/** For streams: logic role of this media. One of the strings "video", "music", "game", "event", "phone", "animation", "production", "a11y", "test" */
 #define PA_PROP_MEDIA_ROLE                     "media.role"
+
+/** For streams: the name of a filter that is desired, e.g. "echo-cancel" or "equalizer-sink". PulseAudio may choose to not apply the filter if it does not make sense (for example, applying echo-cancellation on a Bluetooth headset probably does not make sense. \since 1.0 */
+#define PA_PROP_FILTER_WANT                    "filter.want"
+
+/** For streams: the name of a filter that is desired, e.g. "echo-cancel" or "equalizer-sink". Differs from PA_PROP_FILTER_WANT in that it forces PulseAudio to apply the filter, regardless of whether PulseAudio thinks it makes sense to do so or not. If this is set, PA_PROP_FILTER_WANT is ignored. In other words, you almost certainly do not want to use this. \since 1.0 */
+#define PA_PROP_FILTER_APPLY                   "filter.apply"
+
+/** For streams: the name of a filter that should specifically suppressed (i.e. overrides PA_PROP_FILTER_WANT). Useful for the times that PA_PROP_FILTER_WANT is automatically added (e.g. echo-cancellation for phone streams when $VOIP_APP does it's own, internal AEC) \since 1.0 */
+#define PA_PROP_FILTER_SUPPRESS                "filter.suppress"
 
 /** For event sound streams: XDG event sound name. e.g. "message-new-email" (Event sound streams are those with media.role set to "event") */
 #define PA_PROP_EVENT_ID                       "event.id"
@@ -115,7 +127,7 @@ PA_C_DECL_BEGIN
 /** For streams that belong to a window on the screen: relative position of the window center on the screen, float formatted as text string, ranging from 0.0 (top of the screen) to 1.0 (bottom of the screen). e.g. "0.43". \since 0.9.17 */
 #define PA_PROP_WINDOW_VPOS                    "window.vpos"
 
-/** For streams that belong to a window on the screen: if the windowing system supports multiple desktops, a comma seperated list of indexes of the desktops this window is visible on. If this property is an empty string, it is visible on all desktops (i.e. 'sticky'). The first desktop is 0. e.g. "0,2,3" \since 0.9.18 */
+/** For streams that belong to a window on the screen: if the windowing system supports multiple desktops, a comma separated list of indexes of the desktops this window is visible on. If this property is an empty string, it is visible on all desktops (i.e. 'sticky'). The first desktop is 0. e.g. "0,2,3" \since 0.9.18 */
 #define PA_PROP_WINDOW_DESKTOP                 "window.desktop"
 
 /** For streams that belong to an X11 window on the screen: the X11 display string. e.g. ":0.0" */
@@ -227,7 +239,7 @@ PA_C_DECL_BEGIN
 /** For devices: profile identifier for the profile this devices is in. e.g. "analog-stereo", "analog-surround-40", "iec958-stereo", ...*/
 #define PA_PROP_DEVICE_PROFILE_NAME            "device.profile.name"
 
-/** For devices: intended use. A comma seperated list of roles (see PA_PROP_MEDIA_ROLE) this device is particularly well suited for, due to latency, quality or form factor. \since 0.9.16 */
+/** For devices: intended use. A space separated list of roles (see PA_PROP_MEDIA_ROLE) this device is particularly well suited for, due to latency, quality or form factor. \since 0.9.16 */
 #define PA_PROP_DEVICE_INTENDED_ROLES          "device.intended_roles"
 
 /** For devices: human readable one-line description of the profile this device is in. e.g. "Analog Stereo", ... */
@@ -244,6 +256,18 @@ PA_C_DECL_BEGIN
 
 /** For modules: a version string for the module. e.g. "0.9.15" */
 #define PA_PROP_MODULE_VERSION                 "module.version"
+
+/** For PCM formats: the sample format used as returned by pa_sample_format_to_string() \since 1.0 */
+#define PA_PROP_FORMAT_SAMPLE_FORMAT           "format.sample_format"
+
+/** For all formats: the sample rate (unsigned integer) \since 1.0 */
+#define PA_PROP_FORMAT_RATE                    "format.rate"
+
+/** For all formats: the number of channels (unsigned integer) \since 1.0 */
+#define PA_PROP_FORMAT_CHANNELS                "format.channels"
+
+/** For PCM formats: the channel map of the stream as returned by pa_channel_map_snprint() \since 1.0 */
+#define PA_PROP_FORMAT_CHANNEL_MAP             "format.channel_map"
 
 /** A property list object. Basically a dictionary with ASCII strings
  * as keys and arbitrary data as values. \since 0.9.11 */
@@ -287,8 +311,8 @@ int pa_proplist_set(pa_proplist *p, const char *key, const void *data, size_t nb
  * the data before accessing the property list again. \since 0.9.11 */
 const char *pa_proplist_gets(pa_proplist *p, const char *key);
 
-/** Return the the value for the specified key. Will return a
- * NUL-terminated string for string entries. The pointer returned will
+/** Store the value for the specified key in \a data. Will store a
+ * NUL-terminated string for string entries. The \a data pointer returned will
  * point to an internally allocated buffer. The caller should make a
  * copy of the data before the property list is accessed again. \since
  * 0.9.11 */
@@ -298,7 +322,7 @@ int pa_proplist_get(pa_proplist *p, const char *key, const void **data, size_t *
 typedef enum pa_update_mode {
     PA_UPDATE_SET
     /**< Replace the entire property list with the new one. Don't keep
-     *  any of the old data around */,
+     *  any of the old data around. */,
 
     PA_UPDATE_MERGE
     /**< Merge new property list into the existing one, not replacing
@@ -319,16 +343,16 @@ typedef enum pa_update_mode {
 
 /** Merge property list "other" into "p", adhering the merge mode as
  * specified in "mode". \since 0.9.11 */
-void pa_proplist_update(pa_proplist *p, pa_update_mode_t mode, pa_proplist *other);
+void pa_proplist_update(pa_proplist *p, pa_update_mode_t mode, const pa_proplist *other);
 
 /** Removes a single entry from the property list, identified be the
  * specified key name. \since 0.9.11 */
 int pa_proplist_unset(pa_proplist *p, const char *key);
 
-/** Similar to pa_proplist_remove() but takes an array of keys to
- * remove. The array should be terminated by a NULL pointer. Return -1
+/** Similar to pa_proplist_unset() but takes an array of keys to
+ * remove. The array should be terminated by a NULL pointer. Returns -1
  * on failure, otherwise the number of entries actually removed (which
- * might even be 0, if there where no matching entries to
+ * might even be 0, if there were no matching entries to
  * remove). \since 0.9.11 */
 int pa_proplist_unset_many(pa_proplist *p, const char * const keys[]);
 
@@ -337,20 +361,20 @@ int pa_proplist_unset_many(pa_proplist *p, const char * const keys[]);
  * to this variable should then be passed to pa_proplist_iterate()
  * which should be called in a loop until it returns NULL which
  * signifies EOL. The property list should not be modified during
- * iteration through the list -- except for deleting the current
- * looked at entry. On each invication this function will return the
+ * iteration through the list -- with the exception of deleting the
+ * current entry. On each invocation this function will return the
  * key string for the next entry. The keys in the property list do not
  * have any particular order. \since 0.9.11 */
 const char *pa_proplist_iterate(pa_proplist *p, void **state);
 
 /** Format the property list nicely as a human readable string. This
  * works very much like pa_proplist_to_string_sep() and uses a newline
- * as seperator and appends one final one. Call pa_xfree() on the
+ * as separator and appends one final one. Call pa_xfree() on the
  * result. \since 0.9.11 */
 char *pa_proplist_to_string(pa_proplist *p);
 
 /** Format the property list nicely as a human readable string and
- * choose the seperator. Call pa_xfree() on the result. \since
+ * choose the separator. Call pa_xfree() on the result. \since
  * 0.9.15 */
 char *pa_proplist_to_string_sep(pa_proplist *p, const char *sep);
 
@@ -358,7 +382,7 @@ char *pa_proplist_to_string_sep(pa_proplist *p, const char *sep);
  * readable string. \since 0.9.15 */
 pa_proplist *pa_proplist_from_string(const char *str);
 
-  /** Returns 1 if an entry for the specified key is existant in the
+/** Returns 1 if an entry for the specified key exists in the
  * property list. \since 0.9.11 */
 int pa_proplist_contains(pa_proplist *p, const char *key);
 
@@ -366,14 +390,18 @@ int pa_proplist_contains(pa_proplist *p, const char *key);
 void pa_proplist_clear(pa_proplist *p);
 
 /** Allocate a new property list and copy over every single entry from
- * the specific list. \since 0.9.11 */
-pa_proplist* pa_proplist_copy(pa_proplist *t);
+ * the specified list. \since 0.9.11 */
+pa_proplist* pa_proplist_copy(const pa_proplist *p);
 
-/** Return the number of entries on the property list. \since 0.9.15 */
-unsigned pa_proplist_size(pa_proplist *t);
+/** Return the number of entries in the property list. \since 0.9.15 */
+unsigned pa_proplist_size(pa_proplist *p);
 
 /** Returns 0 when the proplist is empty, positive otherwise \since 0.9.15 */
-int pa_proplist_isempty(pa_proplist *t);
+int pa_proplist_isempty(pa_proplist *p);
+
+/** Return non-zero when a and b have the same keys and values.
+ * \since 0.9.16 */
+int pa_proplist_equal(pa_proplist *a, pa_proplist *b);
 
 PA_C_DECL_END
 

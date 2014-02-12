@@ -27,15 +27,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <pulsecore/g711.h>
 #include <pulsecore/macro.h>
-
-#include "endianmacros.h"
+#include <pulsecore/endianmacros.h>
 
 #include "cpu-x86.h"
 #include "sconv.h"
 
-#if defined (__i386__) || defined (__amd64__)
+#if !defined(__APPLE__) && defined (__i386__) || defined (__amd64__)
 
 static const PA_DECLARE_ALIGNED (16, float, one[4]) = { 1.0, 1.0, 1.0, 1.0 };
 static const PA_DECLARE_ALIGNED (16, float, mone[4]) = { -1.0, -1.0, -1.0, -1.0 };
@@ -56,8 +54,8 @@ static void pa_sconv_s16le_from_f32ne_sse(unsigned n, const float *a, int16_t *b
         " je 2f                         \n\t"
 
         "1:                             \n\t"
-        " movups (%2, %0, 2), %%xmm0    \n\t" /* read 8 floats */
-        " movups 16(%2, %0, 2), %%xmm2  \n\t"
+        " movups (%q2, %0, 2), %%xmm0   \n\t" /* read 8 floats */
+        " movups 16(%q2, %0, 2), %%xmm2 \n\t"
         " minps  %%xmm5, %%xmm0         \n\t" /* clamp to 1.0 */
         " minps  %%xmm5, %%xmm2         \n\t"
         " maxps  %%xmm6, %%xmm0         \n\t" /* clamp to -1.0 */
@@ -74,8 +72,8 @@ static void pa_sconv_s16le_from_f32ne_sse(unsigned n, const float *a, int16_t *b
 
         " packssdw %%mm1, %%mm0         \n\t" /* pack parts */
         " packssdw %%mm3, %%mm2         \n\t"
-        " movq     %%mm0, (%3, %0)      \n\t"
-        " movq    %%mm2, 8(%3, %0)     \n\t"
+        " movq     %%mm0, (%q3, %0)     \n\t"
+        " movq    %%mm2, 8(%q3, %0)     \n\t"
 
         " add $16, %0                   \n\t"
         " dec %1                        \n\t"
@@ -87,12 +85,12 @@ static void pa_sconv_s16le_from_f32ne_sse(unsigned n, const float *a, int16_t *b
         " je 4f                         \n\t"
 
         "3:                             \n\t"
-        " movss (%2, %0, 2), %%xmm0     \n\t"
+        " movss (%q2, %0, 2), %%xmm0    \n\t"
         " minss  %%xmm5, %%xmm0         \n\t"
         " maxss  %%xmm6, %%xmm0         \n\t"
         " mulss  %%xmm7, %%xmm0         \n\t"
         " cvtss2si %%xmm0, %4           \n\t"
-        " movw  %w4, (%3, %0)           \n\t"
+        " movw  %w4, (%q3, %0)          \n\t"
         " add $2, %0                    \n\t"
         " dec %1                        \n\t"
         " jne 3b                        \n\t"
@@ -121,8 +119,8 @@ static void pa_sconv_s16le_from_f32ne_sse2(unsigned n, const float *a, int16_t *
         " je 2f                         \n\t"
 
         "1:                             \n\t"
-        " movups (%2, %0, 2), %%xmm0    \n\t" /* read 8 floats */
-        " movups 16(%2, %0, 2), %%xmm2  \n\t"
+        " movups (%q2, %0, 2), %%xmm0   \n\t" /* read 8 floats */
+        " movups 16(%q2, %0, 2), %%xmm2 \n\t"
         " minps  %%xmm5, %%xmm0         \n\t" /* clamp to 1.0 */
         " minps  %%xmm5, %%xmm2         \n\t"
         " maxps  %%xmm6, %%xmm0         \n\t" /* clamp to -1.0 */
@@ -134,7 +132,7 @@ static void pa_sconv_s16le_from_f32ne_sse2(unsigned n, const float *a, int16_t *
         " cvtps2dq %%xmm2, %%xmm2       \n\t"
 
         " packssdw %%xmm2, %%xmm0       \n\t"
-        " movdqu   %%xmm0, (%3, %0)     \n\t"
+        " movdqu   %%xmm0, (%q3, %0)    \n\t"
 
         " add $16, %0                   \n\t"
         " dec %1                        \n\t"
@@ -146,12 +144,12 @@ static void pa_sconv_s16le_from_f32ne_sse2(unsigned n, const float *a, int16_t *
         " je 4f                         \n\t"
 
         "3:                             \n\t"
-        " movss (%2, %0, 2), %%xmm0     \n\t"
+        " movss (%q2, %0, 2), %%xmm0    \n\t"
         " minss  %%xmm5, %%xmm0         \n\t"
         " maxss  %%xmm6, %%xmm0         \n\t"
         " mulss  %%xmm7, %%xmm0         \n\t"
         " cvtss2si %%xmm0, %4           \n\t"
-        " movw  %w4, (%3, %0)           \n\t"
+        " movw  %w4, (%q3, %0)          \n\t"
         " add $2, %0                    \n\t"
         " dec %1                        \n\t"
         " jne 3b                        \n\t"
@@ -170,7 +168,7 @@ static void pa_sconv_s16le_from_f32ne_sse2(unsigned n, const float *a, int16_t *
 #define SAMPLES 1019
 #define TIMES 1000
 
-static void run_test (void) {
+static void run_test(void) {
     int16_t samples[SAMPLES];
     int16_t samples_ref[SAMPLES];
     float floats[SAMPLES];
@@ -178,18 +176,18 @@ static void run_test (void) {
     pa_usec_t start, stop;
     pa_convert_func_t func;
 
-    printf ("checking SSE %zd\n", sizeof (samples));
+    printf("checking SSE %zd\n", sizeof(samples));
 
-    memset (samples_ref, 0, sizeof (samples_ref));
-    memset (samples, 0, sizeof (samples));
+    memset(samples_ref, 0, sizeof(samples_ref));
+    memset(samples, 0, sizeof(samples));
 
     for (i = 0; i < SAMPLES; i++) {
-        floats[i] = (rand()/(RAND_MAX+2.2)) - 1.1;
+        floats[i] = 2.1f * (rand()/(float) RAND_MAX - 0.5f);
     }
 
-    func = pa_get_convert_from_float32ne_function (PA_SAMPLE_S16LE);
-    func (SAMPLES, floats, samples_ref);
-    pa_sconv_s16le_from_f32ne_sse2 (SAMPLES, floats, samples);
+    func = pa_get_convert_from_float32ne_function(PA_SAMPLE_S16LE);
+    func(SAMPLES, floats, samples_ref);
+    pa_sconv_s16le_from_f32ne_sse2(SAMPLES, floats, samples);
 
     for (i = 0; i < SAMPLES; i++) {
         if (samples[i] != samples_ref[i]) {
@@ -200,14 +198,14 @@ static void run_test (void) {
 
     start = pa_rtclock_now();
     for (i = 0; i < TIMES; i++) {
-        pa_sconv_s16le_from_f32ne_sse2 (SAMPLES, floats, samples);
+        pa_sconv_s16le_from_f32ne_sse2(SAMPLES, floats, samples);
     }
     stop = pa_rtclock_now();
     pa_log_info("SSE: %llu usec.", (long long unsigned int)(stop - start));
 
     start = pa_rtclock_now();
     for (i = 0; i < TIMES; i++) {
-        func (SAMPLES, floats, samples_ref);
+        func(SAMPLES, floats, samples_ref);
     }
     stop = pa_rtclock_now();
     pa_log_info("ref: %llu usec.", (long long unsigned int)(stop - start));
@@ -216,19 +214,19 @@ static void run_test (void) {
 #endif /* defined (__i386__) || defined (__amd64__) */
 
 
-void pa_convert_func_init_sse (pa_cpu_x86_flag_t flags) {
-#if defined (__i386__) || defined (__amd64__)
+void pa_convert_func_init_sse(pa_cpu_x86_flag_t flags) {
+#if !defined(__APPLE__) && defined (__i386__) || defined (__amd64__)
 
 #ifdef RUN_TEST
-    run_test ();
+    run_test();
 #endif
 
     if (flags & PA_CPU_X86_SSE2) {
         pa_log_info("Initialising SSE2 optimized conversions.");
-        pa_set_convert_from_float32ne_function (PA_SAMPLE_S16LE, (pa_convert_func_t) pa_sconv_s16le_from_f32ne_sse2);
+        pa_set_convert_from_float32ne_function(PA_SAMPLE_S16LE, (pa_convert_func_t) pa_sconv_s16le_from_f32ne_sse2);
     } else {
         pa_log_info("Initialising SSE optimized conversions.");
-        pa_set_convert_from_float32ne_function (PA_SAMPLE_S16LE, (pa_convert_func_t) pa_sconv_s16le_from_f32ne_sse);
+        pa_set_convert_from_float32ne_function(PA_SAMPLE_S16LE, (pa_convert_func_t) pa_sconv_s16le_from_f32ne_sse);
     }
 
 #endif /* defined (__i386__) || defined (__amd64__) */

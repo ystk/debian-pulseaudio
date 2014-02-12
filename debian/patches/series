@@ -1,5 +1,3 @@
-0001-Work-around-some-platforms-not-having-O_CLOEXEC.patch
-0002-CVE-2009-1299.patch
-0003-Re-bootstrap.patch
-0004-In-KDE-only-start-pulseaudio-from-the-KDE-specific-d.patch
-0005-Fix-pacmd-poll-usage.patch
+0001_man_page_typos.patch
+remove-analog-mono.patch
+kfreebsd_no_lock_and_threads_synchro.patch

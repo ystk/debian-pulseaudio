@@ -49,7 +49,7 @@
 #ifdef __GNUC__
 #define PA_GCC_UNUSED __attribute__ ((unused))
 #else
-/** Macro for not used parameter */
+/** Macro for not used function, variable or parameter */
 #define PA_GCC_UNUSED
 #endif
 
@@ -119,8 +119,8 @@
 
 #ifndef PA_GCC_WEAKREF
 #if defined(__GNUC__) && defined(__ELF__) && (((__GNUC__ == 4) && (__GNUC_MINOR__ > 1)) || (__GNUC__ > 4))
-/** Macro for usgae of GCC's weakref attribute */
-#define PA_GCC_WEAKREF(x) __attribute__((weakref(#x)));
+/** Macro for usage of GCC's weakref attribute */
+#define PA_GCC_WEAKREF(x) __attribute__((weakref(#x)))
 #endif
 #endif
 

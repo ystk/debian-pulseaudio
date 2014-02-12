@@ -34,13 +34,13 @@ typedef struct pa_memchunk {
 } pa_memchunk;
 
 /* Make a memchunk writable, i.e. make sure that the caller may have
- * exclusive access to the memblock and it is not read_only. If needed
+ * exclusive access to the memblock and it is not read-only. If needed
  * the memblock in the structure is replaced by a copy. If min is not
  * 0 it is made sure that the returned memblock is at least of the
  * specified size, i.e. is enlarged if necessary. */
 pa_memchunk* pa_memchunk_make_writable(pa_memchunk *c, size_t min);
 
-/* Invalidate a memchunk. This does not free the cotaining memblock,
+/* Invalidate a memchunk. This does not free the containing memblock,
  * but sets all members to zero. */
 pa_memchunk* pa_memchunk_reset(pa_memchunk *c);
 
@@ -49,5 +49,8 @@ pa_memchunk *pa_memchunk_will_need(const pa_memchunk *c);
 
 /* Copy the data in the src memchunk to the dst memchunk */
 pa_memchunk* pa_memchunk_memcpy(pa_memchunk *dst, pa_memchunk *src);
+
+/* Return TRUE if any field is set != 0 */
+pa_bool_t pa_memchunk_isset(pa_memchunk *c);
 
 #endif

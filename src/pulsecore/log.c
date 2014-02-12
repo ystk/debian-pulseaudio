@@ -38,6 +38,7 @@
 #include <syslog.h>
 #endif
 
+#include <pulse/gccmacro.h>
 #include <pulse/rtclock.h>
 #include <pulse/utf8.h>
 #include <pulse/xmalloc.h>
@@ -46,9 +47,9 @@
 
 #include <pulsecore/macro.h>
 #include <pulsecore/core-util.h>
-#include <pulsecore/core-rtclock.h>
 #include <pulsecore/once.h>
 #include <pulsecore/ratelimit.h>
+#include <pulsecore/thread.h>
 
 #include "log.h"
 
@@ -61,6 +62,7 @@
 #define ENV_LOG_PRINT_LEVEL "PULSE_LOG_LEVEL"
 #define ENV_LOG_BACKTRACE "PULSE_LOG_BACKTRACE"
 #define ENV_LOG_BACKTRACE_SKIP "PULSE_LOG_BACKTRACE_SKIP"
+#define ENV_LOG_NO_RATELIMIT "PULSE_LOG_NO_RATE_LIMIT"
 
 static char *ident = NULL; /* in local charset format */
 static pa_log_target_t target = PA_LOG_STDERR, target_override;
@@ -68,6 +70,8 @@ static pa_bool_t target_override_set = FALSE;
 static pa_log_level_t maximum_level = PA_LOG_ERROR, maximum_level_override = PA_LOG_ERROR;
 static unsigned show_backtrace = 0, show_backtrace_override = 0, skip_backtrace = 0;
 static pa_log_flags_t flags = 0, flags_override = 0;
+static pa_bool_t no_rate_limit = FALSE;
+static int log_fd = -1;
 
 #ifdef HAVE_SYSLOG_H
 static const int level_to_syslog[] = {
@@ -124,6 +128,15 @@ void pa_log_set_flags(pa_log_flags_t _flags, pa_log_merge_t merge) {
         flags &= ~_flags;
     else
         flags = _flags;
+}
+
+void pa_log_set_fd(int fd) {
+    if (fd >= 0)
+        log_fd = fd;
+    else if (log_fd >= 0) {
+        pa_close(log_fd);
+        log_fd = -1;
+    }
 }
 
 void pa_log_set_show_backtrace(unsigned nlevels) {
@@ -195,54 +208,61 @@ static char* get_backtrace(unsigned show_nframes) {
 #endif
 
 static void init_defaults(void) {
-    const char *e;
+    PA_ONCE_BEGIN {
 
-    if (!ident) {
-        char binary[256];
-        if (pa_get_binary_name(binary, sizeof(binary)))
-            pa_log_set_ident(binary);
-    }
+        const char *e;
 
-    if (getenv(ENV_LOG_SYSLOG)) {
-        target_override = PA_LOG_SYSLOG;
-        target_override_set = TRUE;
-    }
+        if (!ident) {
+            char binary[256];
+            if (pa_get_binary_name(binary, sizeof(binary)))
+                pa_log_set_ident(binary);
+        }
 
-    if ((e = getenv(ENV_LOG_LEVEL))) {
-        maximum_level_override = (pa_log_level_t) atoi(e);
+        if (getenv(ENV_LOG_SYSLOG)) {
+            target_override = PA_LOG_SYSLOG;
+            target_override_set = TRUE;
+        }
 
-        if (maximum_level_override >= PA_LOG_LEVEL_MAX)
-            maximum_level_override = PA_LOG_LEVEL_MAX-1;
-    }
+        if ((e = getenv(ENV_LOG_LEVEL))) {
+            maximum_level_override = (pa_log_level_t) atoi(e);
 
-    if (getenv(ENV_LOG_COLORS))
-        flags_override |= PA_LOG_COLORS;
+            if (maximum_level_override >= PA_LOG_LEVEL_MAX)
+                maximum_level_override = PA_LOG_LEVEL_MAX-1;
+        }
 
-    if (getenv(ENV_LOG_PRINT_TIME))
-        flags_override |= PA_LOG_PRINT_TIME;
+        if (getenv(ENV_LOG_COLORS))
+            flags_override |= PA_LOG_COLORS;
 
-    if (getenv(ENV_LOG_PRINT_FILE))
-        flags_override |= PA_LOG_PRINT_FILE;
+        if (getenv(ENV_LOG_PRINT_TIME))
+            flags_override |= PA_LOG_PRINT_TIME;
 
-    if (getenv(ENV_LOG_PRINT_META))
-        flags_override |= PA_LOG_PRINT_META;
+        if (getenv(ENV_LOG_PRINT_FILE))
+            flags_override |= PA_LOG_PRINT_FILE;
 
-    if (getenv(ENV_LOG_PRINT_LEVEL))
-        flags_override |= PA_LOG_PRINT_LEVEL;
+        if (getenv(ENV_LOG_PRINT_META))
+            flags_override |= PA_LOG_PRINT_META;
 
-    if ((e = getenv(ENV_LOG_BACKTRACE))) {
-        show_backtrace_override = (unsigned) atoi(e);
+        if (getenv(ENV_LOG_PRINT_LEVEL))
+            flags_override |= PA_LOG_PRINT_LEVEL;
 
-        if (show_backtrace_override <= 0)
-            show_backtrace_override = 0;
-    }
+        if ((e = getenv(ENV_LOG_BACKTRACE))) {
+            show_backtrace_override = (unsigned) atoi(e);
 
-    if ((e = getenv(ENV_LOG_BACKTRACE_SKIP))) {
-        skip_backtrace = (unsigned) atoi(e);
+            if (show_backtrace_override <= 0)
+                show_backtrace_override = 0;
+        }
 
-        if (skip_backtrace <= 0)
-            skip_backtrace = 0;
-    }
+        if ((e = getenv(ENV_LOG_BACKTRACE_SKIP))) {
+            skip_backtrace = (unsigned) atoi(e);
+
+            if (skip_backtrace <= 0)
+                skip_backtrace = 0;
+        }
+
+        if (getenv(ENV_LOG_NO_RATELIMIT))
+            no_rate_limit = TRUE;
+
+    } PA_ONCE_END;
 }
 
 void pa_log_levelv_meta(
@@ -268,9 +288,7 @@ void pa_log_levelv_meta(
     pa_assert(level < PA_LOG_LEVEL_MAX);
     pa_assert(format);
 
-    PA_ONCE_BEGIN {
-        init_defaults();
-    } PA_ONCE_END;
+    init_defaults();
 
     _target = target_override_set ? target_override : target;
     _maximum_level = PA_MAX(maximum_level, maximum_level_override);
@@ -285,9 +303,9 @@ void pa_log_levelv_meta(
     pa_vsnprintf(text, sizeof(text), format, ap);
 
     if ((_flags & PA_LOG_PRINT_META) && file && line > 0 && func)
-        pa_snprintf(location, sizeof(location), "[%s:%i %s()] ", file, line, func);
+        pa_snprintf(location, sizeof(location), "[%s][%s:%i %s()] ", pa_thread_get_name(pa_thread_self()), file, line, func);
     else if ((_flags & (PA_LOG_PRINT_META|PA_LOG_PRINT_FILE)) && file)
-        pa_snprintf(location, sizeof(location), "%s: ", pa_path_get_filename(file));
+        pa_snprintf(location, sizeof(location), "[%s] %s: ", pa_thread_get_name(pa_thread_self()), pa_path_get_filename(file));
     else
         location[0] = 0;
 
@@ -367,6 +385,9 @@ void pa_log_levelv_meta(
                     fprintf(stderr, "%s%c: %s%s%s%s%s%s\n", timestamp, level_to_char[level], location, prefix, t, grey, pa_strempty(bt), suffix);
                 else
                     fprintf(stderr, "%s%s%s%s%s%s%s\n", timestamp, location, prefix, t, grey, pa_strempty(bt), suffix);
+#ifdef OS_IS_WIN32
+                fflush(stderr);
+#endif
 
                 pa_xfree(local_t);
 
@@ -389,6 +410,23 @@ void pa_log_levelv_meta(
             }
 #endif
 
+            case PA_LOG_FD: {
+                if (log_fd >= 0) {
+                    char metadata[256];
+
+                    pa_snprintf(metadata, sizeof(metadata), "\n%c %s %s", level_to_char[level], timestamp, location);
+
+                    if ((write(log_fd, metadata, strlen(metadata)) < 0) || (write(log_fd, t, strlen(t)) < 0)) {
+                        saved_errno = errno;
+                        pa_log_set_fd(-1);
+                        fprintf(stderr, "%s\n", "Error writing logs to a file descriptor. Redirect log messages to console.");
+                        fprintf(stderr, "%s %s\n", metadata, t);
+                        pa_log_set_target(PA_LOG_STDERR);
+                    }
+                }
+
+                break;
+            }
             case PA_LOG_NULL:
             default:
                 break;
@@ -424,9 +462,14 @@ void pa_log_level(pa_log_level_t level, const char *format, ...) {
     va_end(ap);
 }
 
-pa_bool_t pa_log_ratelimit(void) {
+pa_bool_t pa_log_ratelimit(pa_log_level_t level) {
     /* Not more than 10 messages every 5s */
     static PA_DEFINE_RATELIMIT(ratelimit, 5 * PA_USEC_PER_SEC, 10);
 
-    return pa_ratelimit_test(&ratelimit);
+    init_defaults();
+
+    if (no_rate_limit)
+        return TRUE;
+
+    return pa_ratelimit_test(&ratelimit, level);
 }

@@ -31,19 +31,15 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include <sys/stat.h>
 
 #include <pulse/xmalloc.h>
-#include <pulse/timeval.h>
 
-#include <pulsecore/core-error.h>
 #include <pulsecore/module.h>
 #include <pulsecore/log.h>
 #include <pulsecore/hashmap.h>
 #include <pulsecore/idxset.h>
 #include <pulsecore/core-util.h>
 #include <pulsecore/namereg.h>
-#include <pulsecore/core-scache.h>
 #include <pulsecore/modargs.h>
 #include <pulsecore/dbus-shared.h>
 
@@ -57,13 +53,13 @@ PA_MODULE_VERSION(PACKAGE_VERSION);
 PA_MODULE_LOAD_ONCE(TRUE);
 #if defined(HAVE_ALSA) && defined(HAVE_OSS_OUTPUT)
 PA_MODULE_USAGE("api=<alsa or oss> "
-                "tsched=<enable system timer based scheduling mode?>"
+                "tsched=<enable system timer based scheduling mode?> "
                 "subdevices=<init all subdevices>");
 #elif defined(HAVE_ALSA)
 PA_MODULE_USAGE("api=<alsa> "
                 "tsched=<enable system timer based scheduling mode?>");
 #elif defined(HAVE_OSS_OUTPUT)
-PA_MODULE_USAGE("api=<oss>"
+PA_MODULE_USAGE("api=<oss> "
                 "subdevices=<init all subdevices>");
 #endif
 PA_MODULE_DEPRECATED("Please use module-udev-detect instead of module-hal-detect!");
@@ -87,6 +83,7 @@ struct userdata {
 #ifdef HAVE_OSS_OUTPUT
     pa_bool_t init_subdevs;
 #endif
+    pa_bool_t filter_added:1;
 };
 
 #define CAPABILITY_ALSA "alsa"
@@ -209,7 +206,7 @@ static int hal_device_load_alsa(struct userdata *u, const char *udi, struct devi
 
     /* For each ALSA card that appears the control device will be the
      * last one to be created, this is considered part of the ALSA
-     * usperspace API. We rely on this and load our modules only when
+     * userspace API. We rely on this and load our modules only when
      * the control device is available assuming that *all* device
      * nodes have been properly created and assigned the right ACLs at
      * that time. Also see:
@@ -733,12 +730,9 @@ int pa__init(pa_module*m) {
         goto fail;
     }
 
-    m->userdata = u = pa_xnew(struct userdata, 1);
+    m->userdata = u = pa_xnew0(struct userdata, 1);
     u->core = m->core;
-    u->context = NULL;
-    u->connection = NULL;
     u->devices = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
-    u->capability = NULL;
 
 #ifdef HAVE_ALSA
     u->use_tsched = TRUE;
@@ -800,6 +794,7 @@ int pa__init(pa_module*m) {
         pa_log_error("Failed to add filter function");
         goto fail;
     }
+    u->filter_added = TRUE;
 
     if (pa_dbus_add_matches(
                 pa_dbus_connection_get(u->connection), &error,
@@ -856,7 +851,8 @@ void pa__done(pa_module *m) {
                 "type='signal',sender='org.freedesktop.Hal',interface='org.freedesktop.Hal.Device.AccessControl',member='ACLRemoved'",
                 "type='signal',interface='org.pulseaudio.Server',member='DirtyGiveUpMessage'", NULL);
 
-        dbus_connection_remove_filter(pa_dbus_connection_get(u->connection), filter_cb, u);
+        if (u->filter_added)
+            dbus_connection_remove_filter(pa_dbus_connection_get(u->connection), filter_cb, u);
         pa_dbus_connection_unref(u->connection);
     }
 

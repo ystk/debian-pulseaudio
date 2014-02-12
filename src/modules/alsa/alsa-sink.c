@@ -32,13 +32,14 @@
 #include <valgrind/memcheck.h>
 #endif
 
-#include <pulse/i18n.h>
 #include <pulse/rtclock.h>
 #include <pulse/timeval.h>
-#include <pulse/util.h>
+#include <pulse/volume.h>
 #include <pulse/xmalloc.h>
+#include <pulse/internal.h>
 
 #include <pulsecore/core.h>
+#include <pulsecore/i18n.h>
 #include <pulsecore/module.h>
 #include <pulsecore/memchunk.h>
 #include <pulsecore/sink.h>
@@ -49,7 +50,6 @@
 #include <pulsecore/log.h>
 #include <pulsecore/macro.h>
 #include <pulsecore/thread.h>
-#include <pulsecore/core-error.h>
 #include <pulsecore/thread-mq.h>
 #include <pulsecore/rtpoll.h>
 #include <pulsecore/time-smoother.h>
@@ -69,19 +69,25 @@
 #define TSCHED_WATERMARK_INC_STEP_USEC (10*PA_USEC_PER_MSEC)       /* 10ms  -- On underrun, increase watermark by this */
 #define TSCHED_WATERMARK_DEC_STEP_USEC (5*PA_USEC_PER_MSEC)        /* 5ms   -- When everything's great, decrease watermark by this */
 #define TSCHED_WATERMARK_VERIFY_AFTER_USEC (20*PA_USEC_PER_SEC)    /* 20s   -- How long after a drop out recheck if things are good now */
-#define TSCHED_WATERMARK_INC_THRESHOLD_USEC (0*PA_USEC_PER_MSEC)   /* 0ms   -- If the buffer level ever below this theshold, increase the watermark */
-#define TSCHED_WATERMARK_DEC_THRESHOLD_USEC (100*PA_USEC_PER_MSEC) /* 100ms -- If the buffer level didn't drop below this theshold in the verification time, decrease the watermark */
+#define TSCHED_WATERMARK_INC_THRESHOLD_USEC (0*PA_USEC_PER_MSEC)   /* 0ms   -- If the buffer level ever below this threshold, increase the watermark */
+#define TSCHED_WATERMARK_DEC_THRESHOLD_USEC (100*PA_USEC_PER_MSEC) /* 100ms -- If the buffer level didn't drop below this threshold in the verification time, decrease the watermark */
 
-/* Note that TSCHED_WATERMARK_INC_THRESHOLD_USEC == 0 means tht we
+/* Note that TSCHED_WATERMARK_INC_THRESHOLD_USEC == 0 means that we
  * will increase the watermark only if we hit a real underrun. */
 
 #define TSCHED_MIN_SLEEP_USEC (10*PA_USEC_PER_MSEC)                /* 10ms  -- Sleep at least 10ms on each iteration */
 #define TSCHED_MIN_WAKEUP_USEC (4*PA_USEC_PER_MSEC)                /* 4ms   -- Wakeup at least this long before the buffer runs empty*/
 
+#define SMOOTHER_WINDOW_USEC  (10*PA_USEC_PER_SEC)                 /* 10s   -- smoother windows size */
+#define SMOOTHER_ADJUST_USEC  (1*PA_USEC_PER_SEC)                  /* 1s    -- smoother adjust time */
+
 #define SMOOTHER_MIN_INTERVAL (2*PA_USEC_PER_MSEC)                 /* 2ms   -- min smoother update interval */
-#define SMOOTHER_MAX_INTERVAL (200*PA_USEC_PER_MSEC)               /* 200ms -- max smoother update inteval */
+#define SMOOTHER_MAX_INTERVAL (200*PA_USEC_PER_MSEC)               /* 200ms -- max smoother update interval */
 
 #define VOLUME_ACCURACY (PA_VOLUME_NORM/100)  /* don't require volume adjustments to be perfectly correct. don't necessarily extend granularity in software unless the differences get greater than this level */
+
+#define DEFAULT_REWIND_SAFEGUARD_BYTES (256U) /* 1.33ms @48kHz, we'll never rewind less than this */
+#define DEFAULT_REWIND_SAFEGUARD_USEC (1330) /* 1.33ms, depending on channels/rate/sample we may rewind more than 256 above */
 
 struct userdata {
     pa_core *core;
@@ -94,46 +100,53 @@ struct userdata {
 
     snd_pcm_t *pcm_handle;
 
+    char *paths_dir;
     pa_alsa_fdlist *mixer_fdl;
+    pa_alsa_mixer_pdata *mixer_pd;
     snd_mixer_t *mixer_handle;
     pa_alsa_path_set *mixer_path_set;
     pa_alsa_path *mixer_path;
 
     pa_cvolume hardware_volume;
 
+    unsigned int *rates;
+
     size_t
         frame_size,
         fragment_size,
         hwbuf_size,
         tsched_watermark,
+        tsched_watermark_ref,
         hwbuf_unused,
         min_sleep,
         min_wakeup,
         watermark_inc_step,
         watermark_dec_step,
         watermark_inc_threshold,
-        watermark_dec_threshold;
+        watermark_dec_threshold,
+        rewind_safeguard;
 
     pa_usec_t watermark_dec_not_before;
+    pa_usec_t min_latency_ref;
 
     pa_memchunk memchunk;
 
     char *device_name;  /* name of the PCM device */
     char *control_device; /* name of the control device */
 
-    pa_bool_t use_mmap:1, use_tsched:1;
+    pa_bool_t use_mmap:1, use_tsched:1, deferred_volume:1, fixed_latency_range:1;
 
     pa_bool_t first, after_rewind;
 
     pa_rtpoll_item *alsa_rtpoll_item;
-
-    snd_mixer_selem_channel_id_t mixer_map[SND_MIXER_SCHN_LAST];
 
     pa_smoother *smoother;
     uint64_t write_count;
     uint64_t since_start;
     pa_usec_t smoother_interval;
     pa_usec_t last_smoother_update;
+
+    pa_idxset *formats;
 
     pa_reserve_wrapper *reserve;
     pa_hook_slot *reserve_slot;
@@ -142,6 +155,15 @@ struct userdata {
 };
 
 static void userdata_free(struct userdata *u);
+
+/* FIXME: Is there a better way to do this than device names? */
+static pa_bool_t is_iec958(struct userdata *u) {
+    return (strncmp("iec958", u->device_name, 6) == 0);
+}
+
+static pa_bool_t is_hdmi(struct userdata *u) {
+    return (strncmp("hdmi", u->device_name, 4) == 0);
+}
 
 static pa_hook_result_t reserve_cb(pa_reserve_wrapper *r, void *forced, struct userdata *u) {
     pa_assert(r);
@@ -246,6 +268,7 @@ static int reserve_monitor_init(struct userdata *u, const char *dname) {
     if (!(rname = pa_alsa_get_reserve_name(dname)))
         return 0;
 
+    /* We are resuming, try to lock the device */
     u->monitor = pa_reserve_monitor_wrapper_get(u->core, rname);
     pa_xfree(rname);
 
@@ -306,7 +329,12 @@ static void increase_watermark(struct userdata *u) {
         return;
     }
 
-    /* Hmm, we cannot increase the watermark any further, hence let's raise the latency */
+    /* Hmm, we cannot increase the watermark any further, hence let's
+       raise the latency, unless doing so was disabled in
+       configuration */
+    if (u->fixed_latency_range)
+        return;
+
     old_min_latency = u->sink->thread_info.min_latency;
     new_min_latency = PA_MIN(old_min_latency * 2, old_min_latency + TSCHED_WATERMARK_INC_STEP_USEC);
     new_min_latency = PA_MIN(new_min_latency, u->sink->thread_info.max_latency);
@@ -427,12 +455,12 @@ static size_t check_left_to_play(struct userdata *u, size_t n_bytes, pa_bool_t o
         left_to_play = 0;
         underrun = TRUE;
 
-#ifdef DEBUG_TIMING
+#if 0
         PA_DEBUG_TRAP;
 #endif
 
         if (!u->first && !u->after_rewind)
-            if (pa_log_ratelimit())
+            if (pa_log_ratelimit(PA_LOG_INFO))
                 pa_log_info("Underrun!");
     }
 
@@ -469,7 +497,7 @@ static size_t check_left_to_play(struct userdata *u, size_t n_bytes, pa_bool_t o
 }
 
 static int mmap_write(struct userdata *u, pa_usec_t *sleep_usec, pa_bool_t polled, pa_bool_t on_timeout) {
-    pa_bool_t work_done = TRUE;
+    pa_bool_t work_done = FALSE;
     pa_usec_t max_sleep_usec = 0, process_usec = 0;
     size_t left_to_play;
     unsigned j = 0;
@@ -579,8 +607,8 @@ static int mmap_write(struct userdata *u, pa_usec_t *sleep_usec, pa_bool_t polle
             }
 
             /* Make sure that if these memblocks need to be copied they will fit into one slot */
-            if (frames > pa_mempool_block_size_max(u->sink->core->mempool)/u->frame_size)
-                frames = pa_mempool_block_size_max(u->sink->core->mempool)/u->frame_size;
+            if (frames > pa_mempool_block_size_max(u->core->mempool)/u->frame_size)
+                frames = pa_mempool_block_size_max(u->core->mempool)/u->frame_size;
 
             if (!after_avail && frames == 0)
                 break;
@@ -607,6 +635,9 @@ static int mmap_write(struct userdata *u, pa_usec_t *sleep_usec, pa_bool_t polle
 
             if (PA_UNLIKELY((sframes = snd_pcm_mmap_commit(u->pcm_handle, offset, frames)) < 0)) {
 
+                if (!after_avail && (int) sframes == -EAGAIN)
+                    break;
+
                 if ((r = try_recover(u, "snd_pcm_mmap_commit", (int) sframes)) == 0)
                     continue;
 
@@ -629,11 +660,15 @@ static int mmap_write(struct userdata *u, pa_usec_t *sleep_usec, pa_bool_t polle
         }
     }
 
-    *sleep_usec = pa_bytes_to_usec(left_to_play, &u->sink->sample_spec);
+    if (u->use_tsched) {
+        *sleep_usec = pa_bytes_to_usec(left_to_play, &u->sink->sample_spec);
+        process_usec = pa_bytes_to_usec(u->tsched_watermark, &u->sink->sample_spec);
 
-    if (*sleep_usec > process_usec)
-        *sleep_usec -= process_usec;
-    else
+        if (*sleep_usec > process_usec)
+            *sleep_usec -= process_usec;
+        else
+            *sleep_usec = 0;
+    } else
         *sleep_usec = 0;
 
     return work_done ? 1 : 0;
@@ -766,11 +801,15 @@ static int unix_write(struct userdata *u, pa_usec_t *sleep_usec, pa_bool_t polle
         }
     }
 
-    *sleep_usec = pa_bytes_to_usec(left_to_play, &u->sink->sample_spec);
+    if (u->use_tsched) {
+        *sleep_usec = pa_bytes_to_usec(left_to_play, &u->sink->sample_spec);
+        process_usec = pa_bytes_to_usec(u->tsched_watermark, &u->sink->sample_spec);
 
-    if (*sleep_usec > process_usec)
-        *sleep_usec -= process_usec;
-    else
+        if (*sleep_usec > process_usec)
+            *sleep_usec -= process_usec;
+        else
+            *sleep_usec = 0;
+    } else
         *sleep_usec = 0;
 
     return work_done ? 1 : 0;
@@ -790,7 +829,7 @@ static void update_smoother(struct userdata *u) {
 
     /* Let's update the time smoother */
 
-    if (PA_UNLIKELY((err = pa_alsa_safe_delay(u->pcm_handle, &delay, u->hwbuf_size, &u->sink->sample_spec)) < 0)) {
+    if (PA_UNLIKELY((err = pa_alsa_safe_delay(u->pcm_handle, &delay, u->hwbuf_size, &u->sink->sample_spec, FALSE)) < 0)) {
         pa_log_warn("Failed to query DSP status data: %s", pa_alsa_strerror(err));
         return;
     }
@@ -876,6 +915,14 @@ static int suspend(struct userdata *u) {
         u->alsa_rtpoll_item = NULL;
     }
 
+    /* We reset max_rewind/max_request here to make sure that while we
+     * are suspended the old max_request/max_rewind values set before
+     * the suspend can influence the per-stream buffer of newly
+     * created streams, without their requirements having any
+     * influence on them. */
+    pa_sink_set_max_rewind_within_thread(u->sink, 0);
+    pa_sink_set_max_request_within_thread(u->sink, 0);
+
     pa_log_info("Device suspended...");
 
     return 0;
@@ -888,7 +935,7 @@ static int update_sw_params(struct userdata *u) {
 
     pa_assert(u);
 
-    /* Use the full buffer if noone asked us for anything specific */
+    /* Use the full buffer if no one asked us for anything specific */
     u->hwbuf_unused = 0;
 
     if (u->use_tsched) {
@@ -933,8 +980,49 @@ static int update_sw_params(struct userdata *u) {
     }
 
     pa_sink_set_max_request_within_thread(u->sink, u->hwbuf_size - u->hwbuf_unused);
+     if (pa_alsa_pcm_is_hw(u->pcm_handle))
+         pa_sink_set_max_rewind_within_thread(u->sink, u->hwbuf_size);
+    else {
+        pa_log_info("Disabling rewind_within_thread for device %s", u->device_name);
+        pa_sink_set_max_rewind_within_thread(u->sink, 0);
+    }
 
     return 0;
+}
+
+/* Called from IO Context on unsuspend or from main thread when creating sink */
+static void reset_watermark(struct userdata *u, size_t tsched_watermark, pa_sample_spec *ss,
+                            pa_bool_t in_thread)
+{
+    u->tsched_watermark = pa_usec_to_bytes_round_up(pa_bytes_to_usec_round_up(tsched_watermark, ss),
+                                                    &u->sink->sample_spec);
+
+    u->watermark_inc_step = pa_usec_to_bytes(TSCHED_WATERMARK_INC_STEP_USEC, &u->sink->sample_spec);
+    u->watermark_dec_step = pa_usec_to_bytes(TSCHED_WATERMARK_DEC_STEP_USEC, &u->sink->sample_spec);
+
+    u->watermark_inc_threshold = pa_usec_to_bytes_round_up(TSCHED_WATERMARK_INC_THRESHOLD_USEC, &u->sink->sample_spec);
+    u->watermark_dec_threshold = pa_usec_to_bytes_round_up(TSCHED_WATERMARK_DEC_THRESHOLD_USEC, &u->sink->sample_spec);
+
+    fix_min_sleep_wakeup(u);
+    fix_tsched_watermark(u);
+
+    if (in_thread)
+        pa_sink_set_latency_range_within_thread(u->sink,
+                                                u->min_latency_ref,
+                                                pa_bytes_to_usec(u->hwbuf_size, ss));
+    else {
+        pa_sink_set_latency_range(u->sink,
+                                  0,
+                                  pa_bytes_to_usec(u->hwbuf_size, ss));
+
+        /* work-around assert in pa_sink_set_latency_within_thead,
+           keep track of min_latency and reuse it when
+           this routine is called from IO context */
+        u->min_latency_ref = u->sink->thread_info.min_latency;
+    }
+
+    pa_log_info("Time scheduling watermark is %0.2fms",
+                (double) pa_bytes_to_usec(u->tsched_watermark, ss) / PA_USEC_PER_MSEC);
 }
 
 /* Called from IO context */
@@ -943,13 +1031,22 @@ static int unsuspend(struct userdata *u) {
     int err;
     pa_bool_t b, d;
     snd_pcm_uframes_t period_size, buffer_size;
+    char *device_name = NULL;
 
     pa_assert(u);
     pa_assert(!u->pcm_handle);
 
     pa_log_info("Trying resume...");
 
-    if ((err = snd_pcm_open(&u->pcm_handle, u->device_name, SND_PCM_STREAM_PLAYBACK,
+    if ((is_iec958(u) || is_hdmi(u)) && pa_sink_is_passthrough(u->sink)) {
+        /* Need to open device in NONAUDIO mode */
+        int len = strlen(u->device_name) + 8;
+
+        device_name = pa_xmalloc(len);
+        pa_snprintf(device_name, len, "%s,AES0=6", u->device_name);
+    }
+
+    if ((err = snd_pcm_open(&u->pcm_handle, device_name ? device_name : u->device_name, SND_PCM_STREAM_PLAYBACK,
                             SND_PCM_NONBLOCK|
                             SND_PCM_NO_AUTO_RESAMPLE|
                             SND_PCM_NO_AUTO_CHANNELS|
@@ -1001,8 +1098,13 @@ static int unsuspend(struct userdata *u) {
     u->first = TRUE;
     u->since_start = 0;
 
+    /* reset the watermark to the value defined when sink was created */
+    if (u->use_tsched)
+        reset_watermark(u, u->tsched_watermark_ref, &u->sink->sample_spec, TRUE);
+
     pa_log_info("Resumed successfully...");
 
+    pa_xfree(device_name);
     return 0;
 
 fail:
@@ -1010,6 +1112,8 @@ fail:
         snd_pcm_close(u->pcm_handle);
         u->pcm_handle = NULL;
     }
+
+    pa_xfree(device_name);
 
     return -PA_ERR_IO;
 }
@@ -1094,7 +1198,7 @@ static int sink_set_state_cb(pa_sink *s, pa_sink_state_t new_state) {
     return 0;
 }
 
-static int mixer_callback(snd_mixer_elem_t *elem, unsigned int mask) {
+static int ctl_mixer_callback(snd_mixer_elem_t *elem, unsigned int mask) {
     struct userdata *u = snd_mixer_elem_get_callback_private(elem);
 
     pa_assert(u);
@@ -1102,6 +1206,14 @@ static int mixer_callback(snd_mixer_elem_t *elem, unsigned int mask) {
 
     if (mask == SND_CTL_EVENT_MASK_REMOVE)
         return 0;
+
+    if (!PA_SINK_IS_LINKED(u->sink->state))
+        return 0;
+
+    if (u->sink->suspend_cause & PA_SUSPEND_SESSION) {
+        pa_sink_set_mixer_dirty(u->sink, TRUE);
+        return 0;
+    }
 
     if (mask & SND_CTL_EVENT_MASK_VALUE) {
         pa_sink_get_volume(u->sink, TRUE);
@@ -1111,10 +1223,30 @@ static int mixer_callback(snd_mixer_elem_t *elem, unsigned int mask) {
     return 0;
 }
 
+static int io_mixer_callback(snd_mixer_elem_t *elem, unsigned int mask) {
+    struct userdata *u = snd_mixer_elem_get_callback_private(elem);
+
+    pa_assert(u);
+    pa_assert(u->mixer_handle);
+
+    if (mask == SND_CTL_EVENT_MASK_REMOVE)
+        return 0;
+
+    if (u->sink->suspend_cause & PA_SUSPEND_SESSION) {
+        pa_sink_set_mixer_dirty(u->sink, TRUE);
+        return 0;
+    }
+
+    if (mask & SND_CTL_EVENT_MASK_VALUE)
+        pa_sink_update_volume_and_mute(u->sink);
+
+    return 0;
+}
+
 static void sink_get_volume_cb(pa_sink *s) {
     struct userdata *u = s->userdata;
     pa_cvolume r;
-    char t[PA_CVOLUME_SNPRINT_MAX];
+    char vol_str_pcnt[PA_CVOLUME_SNPRINT_MAX];
 
     pa_assert(u);
     pa_assert(u->mixer_path);
@@ -1126,7 +1258,13 @@ static void sink_get_volume_cb(pa_sink *s) {
     /* Shift down by the base volume, so that 0dB becomes maximum volume */
     pa_sw_cvolume_multiply_scalar(&r, &r, s->base_volume);
 
-    pa_log_debug("Read hardware volume: %s", pa_cvolume_snprint(t, sizeof(t), &r));
+    pa_log_debug("Read hardware volume: %s", pa_cvolume_snprint(vol_str_pcnt, sizeof(vol_str_pcnt), &r));
+
+    if (u->mixer_path->has_dB) {
+        char vol_str_db[PA_SW_CVOLUME_SNPRINT_DB_MAX];
+
+        pa_log_debug("               in dB: %s", pa_sw_cvolume_snprint_dB(vol_str_db, sizeof(vol_str_db), &r));
+    }
 
     if (pa_cvolume_equal(&u->hardware_volume, &r))
         return;
@@ -1141,7 +1279,8 @@ static void sink_get_volume_cb(pa_sink *s) {
 static void sink_set_volume_cb(pa_sink *s) {
     struct userdata *u = s->userdata;
     pa_cvolume r;
-    char t[PA_CVOLUME_SNPRINT_MAX];
+    char vol_str_pcnt[PA_CVOLUME_SNPRINT_MAX];
+    pa_bool_t deferred_volume = !!(s->flags & PA_SINK_DEFERRED_VOLUME);
 
     pa_assert(u);
     pa_assert(u->mixer_path);
@@ -1150,7 +1289,7 @@ static void sink_set_volume_cb(pa_sink *s) {
     /* Shift up by the base volume */
     pa_sw_cvolume_divide_scalar(&r, &s->real_volume, s->base_volume);
 
-    if (pa_alsa_path_set_volume(u->mixer_path, u->mixer_handle, &s->channel_map, &r) < 0)
+    if (pa_alsa_path_set_volume(u->mixer_path, u->mixer_handle, &s->channel_map, &r, deferred_volume, !deferred_volume) < 0)
         return;
 
     /* Shift down by the base volume, so that 0dB becomes maximum volume */
@@ -1161,6 +1300,7 @@ static void sink_set_volume_cb(pa_sink *s) {
     if (u->mixer_path->has_dB) {
         pa_cvolume new_soft_volume;
         pa_bool_t accurate_enough;
+        char vol_str_db[PA_SW_CVOLUME_SNPRINT_DB_MAX];
 
         /* Match exactly what the user requested by software */
         pa_sw_cvolume_divide(&new_soft_volume, &s->real_volume, &u->hardware_volume);
@@ -1172,21 +1312,67 @@ static void sink_set_volume_cb(pa_sink *s) {
             (pa_cvolume_min(&new_soft_volume) >= (PA_VOLUME_NORM - VOLUME_ACCURACY)) &&
             (pa_cvolume_max(&new_soft_volume) <= (PA_VOLUME_NORM + VOLUME_ACCURACY));
 
-        pa_log_debug("Requested volume: %s", pa_cvolume_snprint(t, sizeof(t), &s->real_volume));
-        pa_log_debug("Got hardware volume: %s", pa_cvolume_snprint(t, sizeof(t), &u->hardware_volume));
-        pa_log_debug("Calculated software volume: %s (accurate-enough=%s)", pa_cvolume_snprint(t, sizeof(t), &new_soft_volume),
+        pa_log_debug("Requested volume: %s", pa_cvolume_snprint(vol_str_pcnt, sizeof(vol_str_pcnt), &s->real_volume));
+        pa_log_debug("           in dB: %s", pa_sw_cvolume_snprint_dB(vol_str_db, sizeof(vol_str_db), &s->real_volume));
+        pa_log_debug("Got hardware volume: %s", pa_cvolume_snprint(vol_str_pcnt, sizeof(vol_str_pcnt), &u->hardware_volume));
+        pa_log_debug("              in dB: %s", pa_sw_cvolume_snprint_dB(vol_str_db, sizeof(vol_str_db), &u->hardware_volume));
+        pa_log_debug("Calculated software volume: %s (accurate-enough=%s)",
+                     pa_cvolume_snprint(vol_str_pcnt, sizeof(vol_str_pcnt), &new_soft_volume),
                      pa_yes_no(accurate_enough));
+        pa_log_debug("                     in dB: %s", pa_sw_cvolume_snprint_dB(vol_str_db, sizeof(vol_str_db), &new_soft_volume));
 
         if (!accurate_enough)
             s->soft_volume = new_soft_volume;
 
     } else {
-        pa_log_debug("Wrote hardware volume: %s", pa_cvolume_snprint(t, sizeof(t), &r));
+        pa_log_debug("Wrote hardware volume: %s", pa_cvolume_snprint(vol_str_pcnt, sizeof(vol_str_pcnt), &r));
 
         /* We can't match exactly what the user requested, hence let's
          * at least tell the user about it */
 
         s->real_volume = r;
+    }
+}
+
+static void sink_write_volume_cb(pa_sink *s) {
+    struct userdata *u = s->userdata;
+    pa_cvolume hw_vol = s->thread_info.current_hw_volume;
+
+    pa_assert(u);
+    pa_assert(u->mixer_path);
+    pa_assert(u->mixer_handle);
+    pa_assert(s->flags & PA_SINK_DEFERRED_VOLUME);
+
+    /* Shift up by the base volume */
+    pa_sw_cvolume_divide_scalar(&hw_vol, &hw_vol, s->base_volume);
+
+    if (pa_alsa_path_set_volume(u->mixer_path, u->mixer_handle, &s->channel_map, &hw_vol, TRUE, TRUE) < 0)
+        pa_log_error("Writing HW volume failed");
+    else {
+        pa_cvolume tmp_vol;
+        pa_bool_t accurate_enough;
+
+        /* Shift down by the base volume, so that 0dB becomes maximum volume */
+        pa_sw_cvolume_multiply_scalar(&hw_vol, &hw_vol, s->base_volume);
+
+        pa_sw_cvolume_divide(&tmp_vol, &hw_vol, &s->thread_info.current_hw_volume);
+        accurate_enough =
+            (pa_cvolume_min(&tmp_vol) >= (PA_VOLUME_NORM - VOLUME_ACCURACY)) &&
+            (pa_cvolume_max(&tmp_vol) <= (PA_VOLUME_NORM + VOLUME_ACCURACY));
+
+        if (!accurate_enough) {
+            union {
+                char db[2][PA_SW_CVOLUME_SNPRINT_DB_MAX];
+                char pcnt[2][PA_CVOLUME_SNPRINT_MAX];
+            } vol;
+
+            pa_log_debug("Written HW volume did not match with the request: %s (request) != %s",
+                         pa_cvolume_snprint(vol.pcnt[0], sizeof(vol.pcnt[0]), &s->thread_info.current_hw_volume),
+                         pa_cvolume_snprint(vol.pcnt[1], sizeof(vol.pcnt[1]), &hw_vol));
+            pa_log_debug("                                           in dB: %s (request) != %s",
+                         pa_sw_cvolume_snprint_dB(vol.db[0], sizeof(vol.db[0]), &s->thread_info.current_hw_volume),
+                         pa_sw_cvolume_snprint_dB(vol.db[1], sizeof(vol.db[1]), &hw_vol));
+        }
     }
 }
 
@@ -1214,6 +1400,55 @@ static void sink_set_mute_cb(pa_sink *s) {
     pa_alsa_path_set_mute(u->mixer_path, u->mixer_handle, s->muted);
 }
 
+static void mixer_volume_init(struct userdata *u) {
+    pa_assert(u);
+
+    if (!u->mixer_path->has_volume) {
+        pa_sink_set_write_volume_callback(u->sink, NULL);
+        pa_sink_set_get_volume_callback(u->sink, NULL);
+        pa_sink_set_set_volume_callback(u->sink, NULL);
+
+        pa_log_info("Driver does not support hardware volume control, falling back to software volume control.");
+    } else {
+        pa_sink_set_get_volume_callback(u->sink, sink_get_volume_cb);
+        pa_sink_set_set_volume_callback(u->sink, sink_set_volume_cb);
+
+        if (u->mixer_path->has_dB && u->deferred_volume) {
+            pa_sink_set_write_volume_callback(u->sink, sink_write_volume_cb);
+            pa_log_info("Successfully enabled deferred volume.");
+        } else
+            pa_sink_set_write_volume_callback(u->sink, NULL);
+
+        if (u->mixer_path->has_dB) {
+            pa_sink_enable_decibel_volume(u->sink, TRUE);
+            pa_log_info("Hardware volume ranges from %0.2f dB to %0.2f dB.", u->mixer_path->min_dB, u->mixer_path->max_dB);
+
+            u->sink->base_volume = pa_sw_volume_from_dB(-u->mixer_path->max_dB);
+            u->sink->n_volume_steps = PA_VOLUME_NORM+1;
+
+            pa_log_info("Fixing base volume to %0.2f dB", pa_sw_volume_to_dB(u->sink->base_volume));
+        } else {
+            pa_sink_enable_decibel_volume(u->sink, FALSE);
+            pa_log_info("Hardware volume ranges from %li to %li.", u->mixer_path->min_volume, u->mixer_path->max_volume);
+
+            u->sink->base_volume = PA_VOLUME_NORM;
+            u->sink->n_volume_steps = u->mixer_path->max_volume - u->mixer_path->min_volume + 1;
+        }
+
+        pa_log_info("Using hardware volume control. Hardware dB scale %s.", u->mixer_path->has_dB ? "supported" : "not supported");
+    }
+
+    if (!u->mixer_path->has_mute) {
+        pa_sink_set_get_mute_callback(u->sink, NULL);
+        pa_sink_set_set_mute_callback(u->sink, NULL);
+        pa_log_info("Driver does not support hardware mute control, falling back to software mute control.");
+    } else {
+        pa_sink_set_get_mute_callback(u->sink, sink_get_mute_cb);
+        pa_sink_set_set_mute_callback(u->sink, sink_set_mute_cb);
+        pa_log_info("Using hardware mute control.");
+    }
+}
+
 static int sink_set_port_cb(pa_sink *s, pa_device_port *p) {
     struct userdata *u = s->userdata;
     pa_alsa_port_data *data;
@@ -1227,26 +1462,20 @@ static int sink_set_port_cb(pa_sink *s, pa_device_port *p) {
     pa_assert_se(u->mixer_path = data->path);
     pa_alsa_path_select(u->mixer_path, u->mixer_handle);
 
-    if (u->mixer_path->has_volume && u->mixer_path->has_dB) {
-        s->base_volume = pa_sw_volume_from_dB(-u->mixer_path->max_dB);
-        s->n_volume_steps = PA_VOLUME_NORM+1;
-
-        if (u->mixer_path->max_dB > 0.0)
-            pa_log_info("Fixing base volume to %0.2f dB", pa_sw_volume_to_dB(s->base_volume));
-        else
-            pa_log_info("No particular base volume set, fixing to 0 dB");
-    } else {
-        s->base_volume = PA_VOLUME_NORM;
-        s->n_volume_steps = u->mixer_path->max_volume - u->mixer_path->min_volume + 1;
-    }
+    mixer_volume_init(u);
 
     if (data->setting)
         pa_alsa_setting_select(data->setting, u->mixer_handle);
 
     if (s->set_mute)
         s->set_mute(s);
-    if (s->set_volume)
-        s->set_volume(s);
+    if (s->flags & PA_SINK_DEFERRED_VOLUME) {
+        if (s->write_volume)
+            s->write_volume(s);
+    } else {
+        if (s->set_volume)
+            s->set_volume(s);
+    }
 
     return 0;
 }
@@ -1255,6 +1484,9 @@ static void sink_update_requested_latency_cb(pa_sink *s) {
     struct userdata *u = s->userdata;
     size_t before;
     pa_assert(u);
+    pa_assert(u->use_tsched); /* only when timer scheduling is used
+                               * we can dynamically adjust the
+                               * latency */
 
     if (!u->pcm_handle)
         return;
@@ -1274,6 +1506,96 @@ static void sink_update_requested_latency_cb(pa_sink *s) {
     }
 }
 
+static pa_idxset* sink_get_formats(pa_sink *s) {
+    struct userdata *u = s->userdata;
+    pa_idxset *ret = pa_idxset_new(NULL, NULL);
+    pa_format_info *f;
+    uint32_t idx;
+
+    pa_assert(u);
+
+    PA_IDXSET_FOREACH(f, u->formats, idx) {
+        pa_idxset_put(ret, pa_format_info_copy(f), NULL);
+    }
+
+    return ret;
+}
+
+static pa_bool_t sink_set_formats(pa_sink *s, pa_idxset *formats) {
+    struct userdata *u = s->userdata;
+    pa_format_info *f, *g;
+    uint32_t idx, n;
+
+    pa_assert(u);
+
+    /* FIXME: also validate sample rates against what the device supports */
+    PA_IDXSET_FOREACH(f, formats, idx) {
+        if (is_iec958(u) && f->encoding == PA_ENCODING_EAC3_IEC61937)
+            /* EAC3 cannot be sent over over S/PDIF */
+            return FALSE;
+    }
+
+    pa_idxset_free(u->formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+    u->formats = pa_idxset_new(NULL, NULL);
+
+    /* Note: the logic below won't apply if we're using software encoding.
+     * This is fine for now since we don't support that via the passthrough
+     * framework, but this must be changed if we do. */
+
+    /* Count how many sample rates we support */
+    for (idx = 0, n = 0; u->rates[idx]; idx++)
+        n++;
+
+    /* First insert non-PCM formats since we prefer those. */
+    PA_IDXSET_FOREACH(f, formats, idx) {
+        if (!pa_format_info_is_pcm(f)) {
+            g = pa_format_info_copy(f);
+            pa_format_info_set_prop_int_array(g, PA_PROP_FORMAT_RATE, (int *) u->rates, n);
+            pa_idxset_put(u->formats, g, NULL);
+        }
+    }
+
+    /* Now add any PCM formats */
+    PA_IDXSET_FOREACH(f, formats, idx) {
+        if (pa_format_info_is_pcm(f)) {
+            /* We don't set rates here since we'll just tack on a resampler for
+             * unsupported rates */
+            pa_idxset_put(u->formats, pa_format_info_copy(f), NULL);
+        }
+    }
+
+    return TRUE;
+}
+
+static pa_bool_t sink_update_rate_cb(pa_sink *s, uint32_t rate)
+{
+    struct userdata *u = s->userdata;
+    int i;
+    pa_bool_t supported = FALSE;
+
+    pa_assert(u);
+
+    for (i = 0; u->rates[i]; i++) {
+        if (u->rates[i] == rate) {
+            supported = TRUE;
+            break;
+        }
+    }
+
+    if (!supported) {
+        pa_log_info("Sink does not support sample rate of %d Hz", rate);
+        return FALSE;
+    }
+
+    if (!PA_SINK_IS_OPENED(s->state)) {
+        pa_log_info("Updating rate for device %s, new rate is %d",u->device_name, rate);
+        u->sink->sample_spec.rate = rate;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 static int process_rewind(struct userdata *u) {
     snd_pcm_sframes_t unused;
     size_t rewind_nbytes, unused_nbytes, limit_nbytes;
@@ -1289,7 +1611,10 @@ static int process_rewind(struct userdata *u) {
         return -1;
     }
 
-    unused_nbytes = u->tsched_watermark + (size_t) unused * u->frame_size;
+    unused_nbytes = (size_t) unused * u->frame_size;
+
+    /* make sure rewind doesn't go too far, can cause issues with DMAs */
+    unused_nbytes += u->rewind_safeguard;
 
     if (u->hwbuf_size > unused_nbytes)
         limit_nbytes = u->hwbuf_size - unused_nbytes;
@@ -1349,6 +1674,7 @@ static void thread_func(void *userdata) {
 
     for (;;) {
         int ret;
+        pa_usec_t rtpoll_sleep = 0;
 
 #ifdef DEBUG_TIMING
         pa_log_debug("Loop");
@@ -1381,6 +1707,8 @@ static void thread_func(void *userdata) {
                     snd_pcm_start(u->pcm_handle);
 
                     pa_smoother_resume(u->smoother, pa_rtclock_now(), TRUE);
+
+                    u->first = FALSE;
                 }
 
                 update_smoother(u);
@@ -1399,36 +1727,55 @@ static void thread_func(void *userdata) {
                      * we have filled the buffer at least once
                      * completely.*/
 
-                    if (pa_log_ratelimit())
+                    if (pa_log_ratelimit(PA_LOG_DEBUG))
                         pa_log_debug("Cutting sleep time for the initial iterations by half.");
                     sleep_usec /= 2;
                 }
 
                 /* OK, the playback buffer is now full, let's
                  * calculate when to wake up next */
-/*                 pa_log_debug("Waking up in %0.2fms (sound card clock).", (double) sleep_usec / PA_USEC_PER_MSEC); */
+#ifdef DEBUG_TIMING
+                pa_log_debug("Waking up in %0.2fms (sound card clock).", (double) sleep_usec / PA_USEC_PER_MSEC);
+#endif
 
                 /* Convert from the sound card time domain to the
                  * system time domain */
                 cusec = pa_smoother_translate(u->smoother, pa_rtclock_now(), sleep_usec);
 
-/*                 pa_log_debug("Waking up in %0.2fms (system clock).", (double) cusec / PA_USEC_PER_MSEC); */
+#ifdef DEBUG_TIMING
+                pa_log_debug("Waking up in %0.2fms (system clock).", (double) cusec / PA_USEC_PER_MSEC);
+#endif
 
                 /* We don't trust the conversion, so we wake up whatever comes first */
-                pa_rtpoll_set_timer_relative(u->rtpoll, PA_MIN(sleep_usec, cusec));
+                rtpoll_sleep = PA_MIN(sleep_usec, cusec);
             }
 
-            u->first = FALSE;
             u->after_rewind = FALSE;
 
-        } else if (u->use_tsched)
+        }
 
-            /* OK, we're in an invalid state, let's disable our timers */
+        if (u->sink->flags & PA_SINK_DEFERRED_VOLUME) {
+            pa_usec_t volume_sleep;
+            pa_sink_volume_change_apply(u->sink, &volume_sleep);
+            if (volume_sleep > 0) {
+                if (rtpoll_sleep > 0)
+                    rtpoll_sleep = PA_MIN(volume_sleep, rtpoll_sleep);
+                else
+                    rtpoll_sleep = volume_sleep;
+            }
+        }
+
+        if (rtpoll_sleep > 0)
+            pa_rtpoll_set_timer_relative(u->rtpoll, rtpoll_sleep);
+        else
             pa_rtpoll_set_timer_disabled(u->rtpoll);
 
         /* Hmm, nothing to do. Let's sleep */
         if ((ret = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
             goto fail;
+
+        if (u->sink->flags & PA_SINK_DEFERRED_VOLUME)
+            pa_sink_volume_change_apply(u->sink, NULL);
 
         if (ret == 0)
             goto finish;
@@ -1452,7 +1799,8 @@ static void thread_func(void *userdata) {
 
                 u->first = TRUE;
                 u->since_start = 0;
-            } else if (revents && u->use_tsched && pa_log_ratelimit())
+                revents = 0;
+            } else if (revents && u->use_tsched && pa_log_ratelimit(PA_LOG_DEBUG))
                 pa_log_debug("Wakeup from ALSA!");
 
         } else
@@ -1500,11 +1848,12 @@ static void set_sink_name(pa_sink_new_data *data, pa_modargs *ma, const char *de
 }
 
 static void find_mixer(struct userdata *u, pa_alsa_mapping *mapping, const char *element, pa_bool_t ignore_dB) {
+    snd_hctl_t *hctl;
 
     if (!mapping && !element)
         return;
 
-    if (!(u->mixer_handle = pa_alsa_open_mixer_for_pcm(u->pcm_handle, &u->control_device))) {
+    if (!(u->mixer_handle = pa_alsa_open_mixer_for_pcm(u->pcm_handle, &u->control_device, &hctl))) {
         pa_log_info("Failed to find a working mixer device.");
         return;
     }
@@ -1514,30 +1863,19 @@ static void find_mixer(struct userdata *u, pa_alsa_mapping *mapping, const char 
         if (!(u->mixer_path = pa_alsa_path_synthesize(element, PA_ALSA_DIRECTION_OUTPUT)))
             goto fail;
 
-        if (pa_alsa_path_probe(u->mixer_path, u->mixer_handle, ignore_dB) < 0)
+        if (pa_alsa_path_probe(u->mixer_path, u->mixer_handle, hctl, ignore_dB) < 0)
             goto fail;
 
         pa_log_debug("Probed mixer path %s:", u->mixer_path->name);
         pa_alsa_path_dump(u->mixer_path);
-    } else {
-
-        if (!(u->mixer_path_set = pa_alsa_path_set_new(mapping, PA_ALSA_DIRECTION_OUTPUT)))
-            goto fail;
-
-        pa_alsa_path_set_probe(u->mixer_path_set, u->mixer_handle, ignore_dB);
-
-        pa_log_debug("Probed mixer paths:");
-        pa_alsa_path_set_dump(u->mixer_path_set);
-    }
+    } else if (!(u->mixer_path_set = mapping->output_path_set))
+        goto fail;
 
     return;
 
 fail:
 
-    if (u->mixer_path_set) {
-        pa_alsa_path_set_free(u->mixer_path_set);
-        u->mixer_path_set = NULL;
-    } else if (u->mixer_path) {
+    if (u->mixer_path) {
         pa_alsa_path_free(u->mixer_path);
         u->mixer_path = NULL;
     }
@@ -1548,7 +1886,10 @@ fail:
     }
 }
 
+
 static int setup_mixer(struct userdata *u, pa_bool_t ignore_dB) {
+    pa_bool_t need_mixer_callback = FALSE;
+
     pa_assert(u);
 
     if (!u->mixer_handle)
@@ -1571,7 +1912,7 @@ static int setup_mixer(struct userdata *u, pa_bool_t ignore_dB) {
     } else {
 
         if (!u->mixer_path && u->mixer_path_set)
-            u->mixer_path = u->mixer_path_set->paths;
+            u->mixer_path = pa_hashmap_first(u->mixer_path_set->paths);
 
         if (u->mixer_path) {
             /* Hmm, we have only a single path, then let's activate it */
@@ -1584,54 +1925,46 @@ static int setup_mixer(struct userdata *u, pa_bool_t ignore_dB) {
             return 0;
     }
 
-    if (!u->mixer_path->has_volume)
-        pa_log_info("Driver does not support hardware volume control, falling back to software volume control.");
-    else {
+    mixer_volume_init(u);
 
-        if (u->mixer_path->has_dB) {
-            pa_log_info("Hardware volume ranges from %0.2f dB to %0.2f dB.", u->mixer_path->min_dB, u->mixer_path->max_dB);
+    /* Will we need to register callbacks? */
+    if (u->mixer_path_set && u->mixer_path_set->paths) {
+        pa_alsa_path *p;
+        void *state;
 
-            u->sink->base_volume = pa_sw_volume_from_dB(-u->mixer_path->max_dB);
-            u->sink->n_volume_steps = PA_VOLUME_NORM+1;
+        PA_HASHMAP_FOREACH(p, u->mixer_path_set->paths, state) {
+            if (p->has_volume || p->has_mute)
+                need_mixer_callback = TRUE;
+        }
+    }
+    else if (u->mixer_path)
+        need_mixer_callback = u->mixer_path->has_volume || u->mixer_path->has_mute;
 
-            if (u->mixer_path->max_dB > 0.0)
-                pa_log_info("Fixing base volume to %0.2f dB", pa_sw_volume_to_dB(u->sink->base_volume));
-            else
-                pa_log_info("No particular base volume set, fixing to 0 dB");
+    if (need_mixer_callback) {
+        int (*mixer_callback)(snd_mixer_elem_t *, unsigned int);
+        if (u->sink->flags & PA_SINK_DEFERRED_VOLUME) {
+            u->mixer_pd = pa_alsa_mixer_pdata_new();
+            mixer_callback = io_mixer_callback;
 
+            if (pa_alsa_set_mixer_rtpoll(u->mixer_pd, u->mixer_handle, u->rtpoll) < 0) {
+                pa_log("Failed to initialize file descriptor monitoring");
+                return -1;
+            }
         } else {
-            pa_log_info("Hardware volume ranges from %li to %li.", u->mixer_path->min_volume, u->mixer_path->max_volume);
-            u->sink->base_volume = PA_VOLUME_NORM;
-            u->sink->n_volume_steps = u->mixer_path->max_volume - u->mixer_path->min_volume + 1;
+            u->mixer_fdl = pa_alsa_fdlist_new();
+            mixer_callback = ctl_mixer_callback;
+
+            if (pa_alsa_fdlist_set_handle(u->mixer_fdl, u->mixer_handle, NULL, u->core->mainloop) < 0) {
+                pa_log("Failed to initialize file descriptor monitoring");
+                return -1;
+            }
         }
 
-        u->sink->get_volume = sink_get_volume_cb;
-        u->sink->set_volume = sink_set_volume_cb;
-
-        u->sink->flags |= PA_SINK_HW_VOLUME_CTRL | (u->mixer_path->has_dB ? PA_SINK_DECIBEL_VOLUME : 0);
-        pa_log_info("Using hardware volume control. Hardware dB scale %s.", u->mixer_path->has_dB ? "supported" : "not supported");
+        if (u->mixer_path_set)
+            pa_alsa_path_set_set_callback(u->mixer_path_set, u->mixer_handle, mixer_callback, u);
+        else
+            pa_alsa_path_set_callback(u->mixer_path, u->mixer_handle, mixer_callback, u);
     }
-
-    if (!u->mixer_path->has_mute) {
-        pa_log_info("Driver does not support hardware mute control, falling back to software mute control.");
-    } else {
-        u->sink->get_mute = sink_get_mute_cb;
-        u->sink->set_mute = sink_set_mute_cb;
-        u->sink->flags |= PA_SINK_HW_MUTE_CTRL;
-        pa_log_info("Using hardware mute control.");
-    }
-
-    u->mixer_fdl = pa_alsa_fdlist_new();
-
-    if (pa_alsa_fdlist_set_mixer(u->mixer_fdl, u->mixer_handle, u->core->mainloop) < 0) {
-        pa_log("Failed to initialize file descriptor monitoring");
-        return -1;
-    }
-
-    if (u->mixer_path_set)
-        pa_alsa_path_set_set_callback(u->mixer_path_set, u->mixer_handle, mixer_callback, u);
-    else
-        pa_alsa_path_set_callback(u->mixer_path, u->mixer_handle, mixer_callback, u);
 
     return 0;
 }
@@ -1640,12 +1973,13 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
 
     struct userdata *u = NULL;
     const char *dev_id = NULL;
-    pa_sample_spec ss, requested_ss;
+    pa_sample_spec ss;
+    uint32_t alternate_sample_rate;
     pa_channel_map map;
-    uint32_t nfrags, frag_size, buffer_size, tsched_size, tsched_watermark;
+    uint32_t nfrags, frag_size, buffer_size, tsched_size, tsched_watermark, rewind_safeguard;
     snd_pcm_uframes_t period_frames, buffer_frames, tsched_frames;
     size_t frame_size;
-    pa_bool_t use_mmap = TRUE, b, use_tsched = TRUE, d, ignore_dB = FALSE;
+    pa_bool_t use_mmap = TRUE, b, use_tsched = TRUE, d, ignore_dB = FALSE, namereg_fail = FALSE, deferred_volume = FALSE, set_formats = FALSE, fixed_latency_range = FALSE;
     pa_sink_new_data data;
     pa_alsa_profile_set *profile_set = NULL;
 
@@ -1659,7 +1993,12 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
         goto fail;
     }
 
-    requested_ss = ss;
+    alternate_sample_rate = m->core->alternate_sample_rate;
+    if (pa_modargs_get_alternate_sample_rate(ma, &alternate_sample_rate) < 0) {
+        pa_log("Failed to parse alternate sample rate");
+        goto fail;
+    }
+
     frame_size = pa_frame_size(&ss);
 
     nfrags = m->core->default_n_fragments;
@@ -1698,6 +2037,23 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
         goto fail;
     }
 
+    rewind_safeguard = PA_MAX(DEFAULT_REWIND_SAFEGUARD_BYTES, pa_usec_to_bytes(DEFAULT_REWIND_SAFEGUARD_USEC, &ss));
+    if (pa_modargs_get_value_u32(ma, "rewind_safeguard", &rewind_safeguard) < 0) {
+        pa_log("Failed to parse rewind_safeguard argument");
+        goto fail;
+    }
+
+    deferred_volume = m->core->deferred_volume;
+    if (pa_modargs_get_value_boolean(ma, "deferred_volume", &deferred_volume) < 0) {
+        pa_log("Failed to parse deferred_volume argument.");
+        goto fail;
+    }
+
+    if (pa_modargs_get_value_boolean(ma, "fixed_latency_range", &fixed_latency_range) < 0) {
+        pa_log("Failed to parse fixed_latency_range argument.");
+        goto fail;
+    }
+
     use_tsched = pa_alsa_may_tsched(use_tsched);
 
     u = pa_xnew0(struct userdata, 1);
@@ -1705,13 +2061,16 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
     u->module = m;
     u->use_mmap = use_mmap;
     u->use_tsched = use_tsched;
+    u->deferred_volume = deferred_volume;
+    u->fixed_latency_range = fixed_latency_range;
     u->first = TRUE;
+    u->rewind_safeguard = rewind_safeguard;
     u->rtpoll = pa_rtpoll_new();
     pa_thread_mq_init(&u->thread_mq, m->core->mainloop, u->rtpoll);
 
     u->smoother = pa_smoother_new(
-            DEFAULT_TSCHED_BUFFER_USEC*2,
-            DEFAULT_TSCHED_BUFFER_USEC*2,
+            SMOOTHER_ADJUST_USEC,
+            SMOOTHER_WINDOW_USEC,
             TRUE,
             TRUE,
             5,
@@ -1722,6 +2081,8 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
     dev_id = pa_modargs_get_value(
             ma, "device_id",
             pa_modargs_get_value(ma, "device", DEFAULT_DEVICE));
+
+    u->paths_dir = pa_xstrdup(pa_modargs_get_value(ma, "paths_dir", NULL));
 
     if (reserve_init(u, dev_id) < 0)
         goto fail;
@@ -1746,7 +2107,6 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
                       SND_PCM_STREAM_PLAYBACK,
                       &period_frames, &buffer_frames, tsched_frames,
                       &b, &d, mapping)))
-
             goto fail;
 
     } else if ((dev_id = pa_modargs_get_value(ma, "device_id", NULL))) {
@@ -1761,7 +2121,6 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
                       SND_PCM_STREAM_PLAYBACK,
                       &period_frames, &buffer_frames, tsched_frames,
                       &b, &d, profile_set, &mapping)))
-
             goto fail;
 
     } else {
@@ -1800,8 +2159,21 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
     if (u->use_mmap)
         pa_log_info("Successfully enabled mmap() mode.");
 
-    if (u->use_tsched)
+    if (u->use_tsched) {
         pa_log_info("Successfully enabled timer-based scheduling mode.");
+
+        if (u->fixed_latency_range)
+            pa_log_info("Disabling latency range changes on underrun");
+    }
+
+    if (is_iec958(u) || is_hdmi(u))
+        set_formats = TRUE;
+
+    u->rates = pa_alsa_get_supported_rates(u->pcm_handle);
+    if (!u->rates) {
+        pa_log_error("Failed to find any supported sample rates.");
+        goto fail;
+    }
 
     /* ALSA might tweak the sample spec, so recalculate the frame size */
     frame_size = pa_frame_size(&ss);
@@ -1813,8 +2185,22 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
     data.module = m;
     data.card = card;
     set_sink_name(&data, ma, dev_id, u->device_name, mapping);
+
+    /* We need to give pa_modargs_get_value_boolean() a pointer to a local
+     * variable instead of using &data.namereg_fail directly, because
+     * data.namereg_fail is a bitfield and taking the address of a bitfield
+     * variable is impossible. */
+    namereg_fail = data.namereg_fail;
+    if (pa_modargs_get_value_boolean(ma, "namereg_fail", &namereg_fail) < 0) {
+        pa_log("Failed to parse namereg_fail argument.");
+        pa_sink_new_data_done(&data);
+        goto fail;
+    }
+    data.namereg_fail = namereg_fail;
+
     pa_sink_new_data_set_sample_spec(&data, &ss);
     pa_sink_new_data_set_channel_map(&data, &map);
+    pa_sink_new_data_set_alternate_sample_rate(&data, alternate_sample_rate);
 
     pa_alsa_init_proplist_pcm(m->core, data.proplist, u->pcm_handle);
     pa_proplist_sets(data.proplist, PA_PROP_DEVICE_STRING, u->device_name);
@@ -1839,9 +2225,10 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
     }
 
     if (u->mixer_path_set)
-        pa_alsa_add_ports(&data.ports, u->mixer_path_set);
+        pa_alsa_add_ports(&data.ports, u->mixer_path_set, card);
 
-    u->sink = pa_sink_new(m->core, &data, PA_SINK_HARDWARE|PA_SINK_LATENCY|(u->use_tsched ? PA_SINK_DYNAMIC_LATENCY : 0));
+    u->sink = pa_sink_new(m->core, &data, PA_SINK_HARDWARE | PA_SINK_LATENCY | (u->use_tsched ? PA_SINK_DYNAMIC_LATENCY : 0) |
+                          (set_formats ? PA_SINK_SET_FORMATS : 0));
     pa_sink_new_data_done(&data);
 
     if (!u->sink) {
@@ -1849,10 +2236,25 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
         goto fail;
     }
 
+    if (pa_modargs_get_value_u32(ma, "deferred_volume_safety_margin",
+                                 &u->sink->thread_info.volume_change_safety_margin) < 0) {
+        pa_log("Failed to parse deferred_volume_safety_margin parameter");
+        goto fail;
+    }
+
+    if (pa_modargs_get_value_s32(ma, "deferred_volume_extra_delay",
+                                 &u->sink->thread_info.volume_change_extra_delay) < 0) {
+        pa_log("Failed to parse deferred_volume_extra_delay parameter");
+        goto fail;
+    }
+
     u->sink->parent.process_msg = sink_process_msg;
-    u->sink->update_requested_latency = sink_update_requested_latency_cb;
+    if (u->use_tsched)
+        u->sink->update_requested_latency = sink_update_requested_latency_cb;
     u->sink->set_state = sink_set_state_cb;
     u->sink->set_port = sink_set_port_cb;
+    if (u->sink->alternate_sample_rate)
+        u->sink->update_rate = sink_update_rate_cb;
     u->sink->userdata = u;
 
     pa_sink_set_asyncmsgq(u->sink, u->thread_mq.inq);
@@ -1871,29 +2273,18 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
                 (double) pa_bytes_to_usec(u->hwbuf_size, &ss) / PA_USEC_PER_MSEC);
 
     pa_sink_set_max_request(u->sink, u->hwbuf_size);
-    pa_sink_set_max_rewind(u->sink, u->hwbuf_size);
+    if (pa_alsa_pcm_is_hw(u->pcm_handle))
+        pa_sink_set_max_rewind(u->sink, u->hwbuf_size);
+    else {
+        pa_log_info("Disabling rewind for device %s", u->device_name);
+        pa_sink_set_max_rewind(u->sink, 0);
+    }
 
     if (u->use_tsched) {
-        u->tsched_watermark = pa_usec_to_bytes_round_up(pa_bytes_to_usec_round_up(tsched_watermark, &requested_ss), &u->sink->sample_spec);
-
-        u->watermark_inc_step = pa_usec_to_bytes(TSCHED_WATERMARK_INC_STEP_USEC, &u->sink->sample_spec);
-        u->watermark_dec_step = pa_usec_to_bytes(TSCHED_WATERMARK_DEC_STEP_USEC, &u->sink->sample_spec);
-
-        u->watermark_inc_threshold = pa_usec_to_bytes_round_up(TSCHED_WATERMARK_INC_THRESHOLD_USEC, &u->sink->sample_spec);
-        u->watermark_dec_threshold = pa_usec_to_bytes_round_up(TSCHED_WATERMARK_DEC_THRESHOLD_USEC, &u->sink->sample_spec);
-
-        fix_min_sleep_wakeup(u);
-        fix_tsched_watermark(u);
-
-        pa_sink_set_latency_range(u->sink,
-                                  0,
-                                  pa_bytes_to_usec(u->hwbuf_size, &ss));
-
-        pa_log_info("Time scheduling watermark is %0.2fms",
-                    (double) pa_bytes_to_usec(u->tsched_watermark, &ss) / PA_USEC_PER_MSEC);
+        u->tsched_watermark_ref = tsched_watermark;
+        reset_watermark(u, u->tsched_watermark_ref, &ss, FALSE);
     } else
         pa_sink_set_fixed_latency(u->sink, pa_bytes_to_usec(u->hwbuf_size, &ss));
-
 
     reserve_update(u);
 
@@ -1905,7 +2296,7 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
 
     pa_alsa_dump(PA_LOG_DEBUG, u->pcm_handle);
 
-    if (!(u->thread = pa_thread_new(thread_func, u))) {
+    if (!(u->thread = pa_thread_new("alsa-sink", thread_func, u))) {
         pa_log("Failed to create thread.");
         goto fail;
     }
@@ -1925,6 +2316,24 @@ pa_sink *pa_alsa_sink_new(pa_module *m, pa_modargs *ma, const char*driver, pa_ca
     } else {
         if (u->sink->get_mute)
             u->sink->get_mute(u->sink);
+    }
+
+    if ((data.volume_is_set || data.muted_is_set) && u->sink->write_volume)
+        u->sink->write_volume(u->sink);
+
+    if (set_formats) {
+        /* For S/PDIF and HDMI, allow getting/setting custom formats */
+        pa_format_info *format;
+
+        /* To start with, we only support PCM formats. Other formats may be added
+         * with pa_sink_set_formats().*/
+        format = pa_format_info_new();
+        format->encoding = PA_ENCODING_PCM;
+        u->formats = pa_idxset_new(NULL, NULL);
+        pa_idxset_put(u->formats, format, NULL);
+
+        u->sink->get_formats = sink_get_formats;
+        u->sink->set_formats = sink_set_formats;
     }
 
     pa_sink_put(u->sink);
@@ -1964,6 +2373,9 @@ static void userdata_free(struct userdata *u) {
     if (u->memchunk.memblock)
         pa_memblock_unref(u->memchunk.memblock);
 
+    if (u->mixer_pd)
+        pa_alsa_mixer_pdata_free(u->mixer_pd);
+
     if (u->alsa_rtpoll_item)
         pa_rtpoll_item_free(u->alsa_rtpoll_item);
 
@@ -1978,9 +2390,7 @@ static void userdata_free(struct userdata *u) {
     if (u->mixer_fdl)
         pa_alsa_fdlist_free(u->mixer_fdl);
 
-    if (u->mixer_path_set)
-        pa_alsa_path_set_free(u->mixer_path_set);
-    else if (u->mixer_path)
+    if (u->mixer_path && !u->mixer_path_set)
         pa_alsa_path_free(u->mixer_path);
 
     if (u->mixer_handle)
@@ -1989,11 +2399,18 @@ static void userdata_free(struct userdata *u) {
     if (u->smoother)
         pa_smoother_free(u->smoother);
 
+    if (u->formats)
+        pa_idxset_free(u->formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+
+    if (u->rates)
+        pa_xfree(u->rates);
+
     reserve_done(u);
     monitor_done(u);
 
     pa_xfree(u->device_name);
     pa_xfree(u->control_device);
+    pa_xfree(u->paths_dir);
     pa_xfree(u);
 }
 

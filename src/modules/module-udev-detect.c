@@ -45,7 +45,9 @@ PA_MODULE_VERSION(PACKAGE_VERSION);
 PA_MODULE_LOAD_ONCE(TRUE);
 PA_MODULE_USAGE(
         "tsched=<enable system timer based scheduling mode?> "
-        "ignore_dB=<ignore dB information from the device?>");
+        "fixed_latency_range=<disable latency range changes on underrun?> "
+        "ignore_dB=<ignore dB information from the device?> "
+        "deferred_volume=<syncronize sw and hw volume changes in IO-thread?>");
 
 struct device {
     char *path;
@@ -61,7 +63,9 @@ struct userdata {
     pa_hashmap *devices;
 
     pa_bool_t use_tsched:1;
+    pa_bool_t fixed_latency_range:1;
     pa_bool_t ignore_dB:1;
+    pa_bool_t deferred_volume:1;
 
     struct udev* udev;
     struct udev_monitor *monitor;
@@ -73,7 +77,9 @@ struct userdata {
 
 static const char* const valid_modargs[] = {
     "tsched",
+    "fixed_latency_range",
     "ignore_dB",
+    "deferred_volume",
     NULL
 };
 
@@ -101,6 +107,63 @@ static const char *path_get_card_id(const char *path) {
         return NULL;
 
     return e + 5;
+}
+
+static char *card_get_sysattr(const char *card_idx, const char *name) {
+    struct udev *udev;
+    struct udev_device *card = NULL;
+    char *t, *r = NULL;
+    const char *v;
+
+    pa_assert(card_idx);
+    pa_assert(name);
+
+    if (!(udev = udev_new())) {
+        pa_log_error("Failed to allocate udev context.");
+        goto finish;
+    }
+
+    t = pa_sprintf_malloc("%s/class/sound/card%s", udev_get_sys_path(udev), card_idx);
+    card = udev_device_new_from_syspath(udev, t);
+    pa_xfree(t);
+
+    if (!card) {
+        pa_log_error("Failed to get card object.");
+        goto finish;
+    }
+
+    if ((v = udev_device_get_sysattr_value(card, name)) && *v)
+        r = pa_xstrdup(v);
+
+finish:
+
+    if (card)
+        udev_device_unref(card);
+
+    if (udev)
+        udev_unref(udev);
+
+    return r;
+}
+
+static pa_bool_t pcm_is_modem(const char *card_idx, const char *pcm) {
+    char *sysfs_path, *pcm_class;
+    pa_bool_t is_modem;
+
+    pa_assert(card_idx);
+    pa_assert(pcm);
+
+    /* Check /sys/class/sound/card.../pcmC...../pcm_class. An HDA
+     * modem can be used simultaneously with generic
+     * playback/record. */
+
+    sysfs_path = pa_sprintf_malloc("pcmC%sD%s/pcm_class", card_idx, pcm);
+    pcm_class = card_get_sysattr(card_idx, sysfs_path);
+    is_modem = pcm_class && pa_streq(pcm_class, "modem");
+    pa_xfree(pcm_class);
+    pa_xfree(sysfs_path);
+
+    return is_modem;
 }
 
 static pa_bool_t is_card_busy(const char *id) {
@@ -141,6 +204,9 @@ static pa_bool_t is_card_busy(const char *id) {
         if (!pa_startswith(de->d_name, "pcm"))
             continue;
 
+        if (pcm_is_modem(id, de->d_name + 3))
+            continue;
+
         pa_xfree(pcm_path);
         pcm_path = pa_sprintf_malloc("%s/%s", card_path, de->d_name);
 
@@ -172,7 +238,7 @@ static pa_bool_t is_card_busy(const char *id) {
             if (status_file)
                 fclose(status_file);
 
-            if (!(status_file = fopen(sub_status, "r"))) {
+            if (!(status_file = pa_fopen_cloexec(sub_status, "r"))) {
                 pa_log_warn("Failed to open %s: %s", sub_status, pa_cstrerror(errno));
                 continue;
             }
@@ -255,13 +321,13 @@ static void verify_access(struct userdata *u, struct device *d) {
                  * A clean fix would be if we would be able to ignore
                  * our own inotify close events. However, inotify
                  * lacks such functionality. Also, during probing of
-                 * the device we cannot really distuingish between
+                 * the device we cannot really distinguish between
                  * other processes causing EBUSY or ourselves, which
                  * means we have no way to figure out if the probing
                  * during opening was canceled by a "try again"
                  * failure or a "fatal" failure. */
 
-                if (pa_ratelimit_test(&d->ratelimit)) {
+                if (pa_ratelimit_test(&d->ratelimit, PA_LOG_DEBUG)) {
                     pa_log_debug("Loading module-alsa-card with arguments '%s'", d->args);
                     m = pa_module_load(u->core, "module-alsa-card", d->args);
 
@@ -323,14 +389,19 @@ static void card_changed(struct userdata *u, struct udev_device *dev) {
     d->args = pa_sprintf_malloc("device_id=\"%s\" "
                                 "name=\"%s\" "
                                 "card_name=\"%s\" "
+                                "namereg_fail=false "
                                 "tsched=%s "
+                                "fixed_latency_range=%s "
                                 "ignore_dB=%s "
+                                "deferred_volume=%s "
                                 "card_properties=\"module-udev-detect.discovered=1\"",
                                 path_get_card_id(path),
                                 n,
                                 d->card_name,
                                 pa_yes_no(u->use_tsched),
-                                pa_yes_no(u->ignore_dB));
+                                pa_yes_no(u->fixed_latency_range),
+                                pa_yes_no(u->ignore_dB),
+                                pa_yes_no(u->deferred_volume));
     pa_xfree(n);
 
     pa_hashmap_put(u->devices, d->path, d);
@@ -366,7 +437,7 @@ static void process_device(struct userdata *u, struct udev_device *dev) {
         return;
     }
 
-    if ((ff = udev_device_get_property_value(dev, "SOUND_FORM_FACTOR")) &&
+    if ((ff = udev_device_get_property_value(dev, "SOUND_CLASS")) &&
         pa_streq(ff, "modem")) {
         pa_log_debug("Ignoring %s, because it is a modem.", udev_device_get_devpath(dev));
         return;
@@ -376,8 +447,7 @@ static void process_device(struct userdata *u, struct udev_device *dev) {
 
     if (action && pa_streq(action, "remove"))
         remove_card(u, dev);
-    else if ((!action || pa_streq(action, "change")) &&
-             udev_device_get_property_value(dev, "SOUND_INITIALIZED"))
+    else if ((!action || pa_streq(action, "change")) && udev_device_get_property_value(dev, "SOUND_INITIALIZED"))
         card_changed(u, dev);
 
     /* For an explanation why we don't look for 'add' events here
@@ -416,8 +486,10 @@ static void monitor_cb(
         goto fail;
     }
 
-    if (!path_get_card_id(udev_device_get_devpath(dev)))
+    if (!path_get_card_id(udev_device_get_devpath(dev))) {
+        udev_device_unref(dev);
         return;
+    }
 
     process_device(u, dev);
     udev_device_unref(dev);
@@ -598,7 +670,8 @@ int pa__init(pa_module *m) {
     struct udev_enumerate *enumerate = NULL;
     struct udev_list_entry *item = NULL, *first = NULL;
     int fd;
-    pa_bool_t use_tsched = TRUE, ignore_dB = FALSE;
+    pa_bool_t use_tsched = TRUE, fixed_latency_range = FALSE, ignore_dB = FALSE, deferred_volume = m->core->deferred_volume;
+
 
     pa_assert(m);
 
@@ -618,11 +691,23 @@ int pa__init(pa_module *m) {
     }
     u->use_tsched = use_tsched;
 
+    if (pa_modargs_get_value_boolean(ma, "fixed_latency_range", &fixed_latency_range) < 0) {
+        pa_log("Failed to parse fixed_latency_range= argument.");
+        goto fail;
+    }
+    u->fixed_latency_range = fixed_latency_range;
+
     if (pa_modargs_get_value_boolean(ma, "ignore_dB", &ignore_dB) < 0) {
         pa_log("Failed to parse ignore_dB= argument.");
         goto fail;
     }
     u->ignore_dB = ignore_dB;
+
+    if (pa_modargs_get_value_boolean(ma, "deferred_volume", &deferred_volume) < 0) {
+        pa_log("Failed to parse deferred_volume= argument.");
+        goto fail;
+    }
+    u->deferred_volume = deferred_volume;
 
     if (!(u->udev = udev_new())) {
         pa_log("Failed to initialize udev library.");
@@ -637,12 +722,17 @@ int pa__init(pa_module *m) {
         goto fail;
     }
 
+    if (udev_monitor_filter_add_match_subsystem_devtype(u->monitor, "sound", NULL) < 0) {
+        pa_log("Failed to subscribe to sound devices.");
+        goto fail;
+    }
+
     errno = 0;
     if (udev_monitor_enable_receiving(u->monitor) < 0) {
         pa_log("Failed to enable monitor: %s", pa_cstrerror(errno));
         if (errno == EPERM)
             pa_log_info("Most likely your kernel is simply too old and "
-                        "allows only priviliged processes to listen to device events. "
+                        "allows only privileged processes to listen to device events. "
                         "Please upgrade your kernel to at least 2.6.30.");
         goto fail;
     }

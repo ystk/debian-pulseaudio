@@ -36,6 +36,7 @@ typedef enum pa_log_target {
     PA_LOG_STDERR,  /* default */
     PA_LOG_SYSLOG,
     PA_LOG_NULL,    /* to /dev/null */
+    PA_LOG_FD,      /* to a file descriptor, e.g. a char device */
     PA_LOG_TARGET_MAX
 } pa_log_target_t;
 
@@ -52,7 +53,7 @@ typedef enum pa_log_flags {
     PA_LOG_COLORS      = 0x01, /* Show colorful output */
     PA_LOG_PRINT_TIME  = 0x02, /* Show time */
     PA_LOG_PRINT_FILE  = 0x04, /* Show source file */
-    PA_LOG_PRINT_META  = 0x08, /* Show extended locaton information */
+    PA_LOG_PRINT_META  = 0x08, /* Show extended location information */
     PA_LOG_PRINT_LEVEL = 0x10, /* Show log level prefix */
 } pa_log_flags_t;
 
@@ -73,6 +74,10 @@ void pa_log_set_level(pa_log_level_t l);
 
 /* Set flags */
 void pa_log_set_flags(pa_log_flags_t flags, pa_log_merge_t merge);
+
+/* Set the file descriptor of the logging device.
+   Daemon conf is in charge of opening this device */
+void pa_log_set_fd(int fd);
 
 /* Enable backtrace */
 void pa_log_set_show_backtrace(unsigned nlevels);
@@ -135,6 +140,6 @@ LOG_FUNC(error, PA_LOG_ERROR)
 
 #define pa_log pa_log_error
 
-pa_bool_t pa_log_ratelimit(void);
+pa_bool_t pa_log_ratelimit(pa_log_level_t level);
 
 #endif

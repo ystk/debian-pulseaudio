@@ -28,7 +28,6 @@
 
 #include <pulse/xmalloc.h>
 #include <pulse/utf8.h>
-#include <pulse/i18n.h>
 
 #include <pulsecore/hashmap.h>
 #include <pulsecore/strbuf.h>
@@ -322,7 +321,7 @@ int pa_proplist_get(pa_proplist *p, const char *key, const void **data, size_t *
     return 0;
 }
 
-void pa_proplist_update(pa_proplist *p, pa_update_mode_t mode, pa_proplist *other) {
+void pa_proplist_update(pa_proplist *p, pa_update_mode_t mode, const pa_proplist *other) {
     struct property *prop;
     void *state = NULL;
 
@@ -333,6 +332,8 @@ void pa_proplist_update(pa_proplist *p, pa_update_mode_t mode, pa_proplist *othe
     if (mode == PA_UPDATE_SET)
         pa_proplist_clear(p);
 
+    /* MAKE_HASHMAP turns the const pointer into a non-const pointer, but
+     * that's ok, because we don't modify the hashmap contents. */
     while ((prop = pa_hashmap_iterate(MAKE_HASHMAP(other), &state, NULL))) {
 
         if (mode == PA_UPDATE_MERGE && pa_proplist_contains(p, prop->key))
@@ -659,15 +660,15 @@ void pa_proplist_clear(pa_proplist *p) {
         property_free(prop);
 }
 
-pa_proplist* pa_proplist_copy(pa_proplist *template) {
-    pa_proplist *p;
+pa_proplist* pa_proplist_copy(const pa_proplist *p) {
+    pa_proplist *copy;
 
-    pa_assert_se(p = pa_proplist_new());
+    pa_assert_se(copy = pa_proplist_new());
 
-    if (template)
-        pa_proplist_update(p, PA_UPDATE_REPLACE, template);
+    if (p)
+        pa_proplist_update(copy, PA_UPDATE_REPLACE, p);
 
-    return p;
+    return copy;
 }
 
 unsigned pa_proplist_size(pa_proplist *p) {
@@ -680,4 +681,33 @@ int pa_proplist_isempty(pa_proplist *p) {
     pa_assert(p);
 
     return pa_hashmap_isempty(MAKE_HASHMAP(p));
+}
+
+int pa_proplist_equal(pa_proplist *a, pa_proplist *b) {
+    const void *key = NULL;
+    struct property *a_prop = NULL;
+    struct property *b_prop = NULL;
+    void *state = NULL;
+
+    pa_assert(a);
+    pa_assert(b);
+
+    if (a == b)
+        return 1;
+
+    if (pa_proplist_size(a) != pa_proplist_size(b))
+        return 0;
+
+    while ((a_prop = pa_hashmap_iterate(MAKE_HASHMAP(a), &state, &key))) {
+        if (!(b_prop = pa_hashmap_get(MAKE_HASHMAP(b), key)))
+            return 0;
+
+        if (a_prop->nbytes != b_prop->nbytes)
+            return 0;
+
+        if (memcmp(a_prop->value, b_prop->value, a_prop->nbytes) != 0)
+            return 0;
+    }
+
+    return 1;
 }

@@ -23,17 +23,15 @@
 #include <config.h>
 #endif
 
-#include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <getopt.h>
-#include <sys/stat.h>
 
 #include <pulse/xmalloc.h>
-#include <pulse/i18n.h>
 #include <pulse/util.h>
 
 #include <pulsecore/core-util.h>
+#include <pulsecore/i18n.h>
 #include <pulsecore/strbuf.h>
 #include <pulsecore/macro.h>
 
@@ -73,7 +71,7 @@ enum {
     ARG_START
 };
 
-/* Tabel for getopt_long() */
+/* Table for getopt_long() */
 static const struct option long_options[] = {
     {"help",                        0, 0, ARG_HELP},
     {"version",                     0, 0, ARG_VERSION},
@@ -87,8 +85,8 @@ static const struct option long_options[] = {
     {"realtime",                    2, 0, ARG_REALTIME},
     {"disallow-module-loading",     2, 0, ARG_DISALLOW_MODULE_LOADING},
     {"disallow-exit",               2, 0, ARG_DISALLOW_EXIT},
-    {"exit-idle-time",              2, 0, ARG_EXIT_IDLE_TIME},
-    {"scache-idle-time",            2, 0, ARG_SCACHE_IDLE_TIME},
+    {"exit-idle-time",              1, 0, ARG_EXIT_IDLE_TIME},
+    {"scache-idle-time",            1, 0, ARG_SCACHE_IDLE_TIME},
     {"log-target",                  1, 0, ARG_LOG_TARGET},
     {"log-meta",                    2, 0, ARG_LOG_META},
     {"log-time",                    2, 0, ARG_LOG_TIME},
@@ -139,13 +137,12 @@ void pa_cmdline_help(const char *argv0) {
            "      --disallow-exit[=BOOL]            Disallow user requested exit\n"
            "      --exit-idle-time=SECS             Terminate the daemon when idle and this\n"
            "                                        time passed\n"
-           "      --module-idle-time=SECS           Unload autoloaded modules when idle and\n"
-           "                                        this time passed\n"
            "      --scache-idle-time=SECS           Unload autoloaded samples when idle and\n"
            "                                        this time passed\n"
            "      --log-level[=LEVEL]               Increase or set verbosity level\n"
            "  -v                                    Increase the verbosity level\n"
-           "      --log-target={auto,syslog,stderr} Specify the log target\n"
+           "      --log-target={auto,syslog,stderr,file:PATH}\n"
+           "                                        Specify the log target\n"
            "      --log-meta[=BOOL]                 Include code location in log messages\n"
            "      --log-time[=BOOL]                 Include timestamps in log messages\n"
            "      --log-backtrace=FRAMES            Include a backtrace in log messages\n"
@@ -318,7 +315,7 @@ int pa_cmdline_parse(pa_daemon_conf *conf, int argc, char *const argv [], int *d
 
             case ARG_LOG_TARGET:
                 if (pa_daemon_conf_set_log_target(conf, optarg) < 0) {
-                    pa_log(_("Invalid log target: use either 'syslog', 'stderr' or 'auto'."));
+                    pa_log(_("Invalid log target: use either 'syslog', 'stderr' or 'auto' or a valid file name 'file:<path>'."));
                     goto fail;
                 }
                 break;

@@ -40,6 +40,8 @@ typedef struct pa_memblockq pa_memblockq;
 
 /* Parameters:
 
+   - name:      name for debugging purposes
+
    - idx:       start value for both read and write index
 
    - maxlength: maximum length of queue. If more data is pushed into
@@ -47,9 +49,9 @@ typedef struct pa_memblockq pa_memblockq;
 
    - tlength:   the target length of the queue. Pass 0 for the default.
 
-   - base:      a base value for all metrics. Only multiples of this value
-                are popped from the queue or should be pushed into
-                it. Must not be 0.
+   - ss:        Sample spec describing the queue contents. Only multiples
+                of the frame size as implied by the sample spec are
+                popped from the queue or should be pushed into it.
 
    - prebuf:    If the queue runs empty wait until this many bytes are in
                 queue again before passing the first byte out. If set
@@ -62,13 +64,14 @@ typedef struct pa_memblockq pa_memblockq;
 
    - maxrewind: how many bytes of history to keep in the queue
 
-   - silence:   return this memchunk when reading unitialized data
+   - silence:   return this memchunk when reading uninitialized data
 */
 pa_memblockq* pa_memblockq_new(
+        const char *name,
         int64_t idx,
         size_t maxlength,
         size_t tlength,
-        size_t base,
+        const pa_sample_spec *sample_spec,
         size_t prebuf,
         size_t minreq,
         size_t maxrewind,
@@ -95,6 +98,11 @@ void pa_memblockq_seek(pa_memblockq *bq, int64_t offset, pa_seek_mode_t seek, pa
  * was passed we return the length of the hole in chunk->length. */
 int pa_memblockq_peek(pa_memblockq* bq, pa_memchunk *chunk);
 
+/* Much like pa_memblockq_peek, but guarantees that the returned chunk
+ * will have a length of the block size passed. You must configure a
+ * silence memchunk for this memblockq if you use this call. */
+int pa_memblockq_peek_fixed_size(pa_memblockq *bq, size_t block_size, pa_memchunk *chunk);
+
 /* Drop the specified bytes from the queue. */
 void pa_memblockq_drop(pa_memblockq *bq, size_t length);
 
@@ -118,7 +126,7 @@ size_t pa_memblockq_pop_missing(pa_memblockq *bq);
 int pa_memblockq_splice(pa_memblockq *bq, pa_memblockq *source);
 
 /* Set the queue to silence, set write index to read index */
-void pa_memblockq_flush_write(pa_memblockq *bq);
+void pa_memblockq_flush_write(pa_memblockq *bq, pa_bool_t account);
 
 /* Set the queue to silence, set write read index to write index*/
 void pa_memblockq_flush_read(pa_memblockq *bq);
@@ -165,7 +173,7 @@ void pa_memblockq_set_silence(pa_memblockq *memblockq, pa_memchunk *silence);
 void pa_memblockq_apply_attr(pa_memblockq *memblockq, const pa_buffer_attr *a);
 void pa_memblockq_get_attr(pa_memblockq *bq, pa_buffer_attr *a);
 
-/* Call pa_memchunk_willneed() for every chunk in the queue from the current read pointer to the end */
+/* Call pa_memchunk_will_need() for every chunk in the queue from the current read pointer to the end */
 void pa_memblockq_willneed(pa_memblockq *bq);
 
 /* Check whether the memblockq is completely empty, i.e. no data

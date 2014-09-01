@@ -96,7 +96,6 @@ pa_rtsp_client* pa_rtsp_client_new(pa_mainloop_api *mainloop, const char* hostna
     return c;
 }
 
-
 void pa_rtsp_client_free(pa_rtsp_client* c) {
     pa_assert(c);
 
@@ -120,7 +119,6 @@ void pa_rtsp_client_free(pa_rtsp_client* c) {
     pa_xfree(c);
 }
 
-
 static void headers_read(pa_rtsp_client *c) {
     char* token;
     char delimiters[] = ";";
@@ -143,9 +141,17 @@ static void headers_read(pa_rtsp_client *c) {
 
         /* Now parse out the server port component of the response. */
         while ((token = pa_split(c->transport, delimiters, &token_state))) {
-            if ((pc = strstr(token, "="))) {
+            if ((pc = strchr(token, '='))) {
                 if (0 == strncmp(token, "server_port", 11)) {
-                    pa_atou(pc+1, (uint32_t*)(&c->rtp_port));
+                    uint32_t p;
+
+                    if (pa_atou(pc + 1, &p) < 0 || p <= 0 || p > 0xffff) {
+                        pa_log("Invalid SETUP response (invalid server_port).");
+                        pa_xfree(token);
+                        return;
+                    }
+
+                    c->rtp_port = p;
                     pa_xfree(token);
                     break;
                 }
@@ -162,7 +168,6 @@ static void headers_read(pa_rtsp_client *c) {
     /* Call our callback */
     c->callback(c, c->state, c->response_headers, c->userdata);
 }
-
 
 static void line_callback(pa_ioline *line, const char *s, void *userdata) {
     char *delimpos;
@@ -187,7 +192,7 @@ static void line_callback(pa_ioline *line, const char *s, void *userdata) {
         *s2p = '\0';
         s2p -= 1;
     }
-    if (c->waiting && 0 == strcmp("RTSP/1.0 200 OK", s2)) {
+    if (c->waiting && pa_streq(s2, "RTSP/1.0 200 OK")) {
         c->waiting = 0;
         if (c->response_headers)
             pa_headerlist_free(c->response_headers);
@@ -270,7 +275,6 @@ static void line_callback(pa_ioline *line, const char *s, void *userdata) {
     pa_xfree(s2);
 }
 
-
 static void on_connection(pa_socket_client *sc, pa_iochannel *io, void *userdata) {
     pa_rtsp_client *c = userdata;
     union {
@@ -325,7 +329,7 @@ int pa_rtsp_connect(pa_rtsp_client *c) {
     c->session = NULL;
 
     pa_log_debug("Attempting to connect to server '%s:%d'", c->hostname, c->port);
-    if (!(c->sc = pa_socket_client_new_string(c->mainloop, TRUE, c->hostname, c->port))) {
+    if (!(c->sc = pa_socket_client_new_string(c->mainloop, true, c->hostname, c->port))) {
         pa_log("failed to connect to server '%s:%d'", c->hostname, c->port);
         return -1;
     }
@@ -350,7 +354,6 @@ void pa_rtsp_disconnect(pa_rtsp_client *c) {
         pa_ioline_close(c->ioline);
     c->ioline = NULL;
 }
-
 
 const char* pa_rtsp_localip(pa_rtsp_client* c) {
     pa_assert(c);
@@ -440,7 +443,6 @@ static int rtsp_exec(pa_rtsp_client* c, const char* cmd,
     return 0;
 }
 
-
 int pa_rtsp_announce(pa_rtsp_client *c, const char* sdp) {
     pa_assert(c);
     if (!sdp)
@@ -449,7 +451,6 @@ int pa_rtsp_announce(pa_rtsp_client *c, const char* sdp) {
     c->state = STATE_ANNOUNCE;
     return rtsp_exec(c, "ANNOUNCE", "application/sdp", sdp, 1, NULL);
 }
-
 
 int pa_rtsp_setup(pa_rtsp_client* c) {
     pa_headerlist* headers;
@@ -465,7 +466,6 @@ int pa_rtsp_setup(pa_rtsp_client* c) {
     pa_headerlist_free(headers);
     return rv;
 }
-
 
 int pa_rtsp_record(pa_rtsp_client* c, uint16_t* seq, uint32_t* rtptime) {
     pa_headerlist* headers;
@@ -493,14 +493,12 @@ int pa_rtsp_record(pa_rtsp_client* c, uint16_t* seq, uint32_t* rtptime) {
     return rv;
 }
 
-
 int pa_rtsp_teardown(pa_rtsp_client *c) {
     pa_assert(c);
 
     c->state = STATE_TEARDOWN;
     return rtsp_exec(c, "TEARDOWN", NULL, NULL, 0, NULL);
 }
-
 
 int pa_rtsp_setparameter(pa_rtsp_client *c, const char* param) {
     pa_assert(c);
@@ -510,7 +508,6 @@ int pa_rtsp_setparameter(pa_rtsp_client *c, const char* param) {
     c->state = STATE_SET_PARAMETER;
     return rtsp_exec(c, "SET_PARAMETER", "text/parameters", param, 1, NULL);
 }
-
 
 int pa_rtsp_flush(pa_rtsp_client *c, uint16_t seq, uint32_t rtptime) {
     pa_headerlist* headers;

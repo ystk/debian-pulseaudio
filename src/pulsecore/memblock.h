@@ -23,29 +23,31 @@
   USA.
 ***/
 
+typedef struct pa_memblock pa_memblock;
+
 #include <sys/types.h>
 #include <inttypes.h>
 
 #include <pulse/def.h>
 #include <pulsecore/atomic.h>
+#include <pulsecore/memchunk.h>
 
 /* A pa_memblock is a reference counted memory block. PulseAudio
- * passed references to pa_memblocks around instead of copying
+ * passes references to pa_memblocks around instead of copying
  * data. See pa_memchunk for a structure that describes parts of
  * memory blocks. */
 
 /* The type of memory this block points to */
 typedef enum pa_memblock_type {
     PA_MEMBLOCK_POOL,             /* Memory is part of the memory pool */
-    PA_MEMBLOCK_POOL_EXTERNAL,    /* Data memory is part of the memory pool but the pa_memblock structure itself not */
-    PA_MEMBLOCK_APPENDED,         /* the data is appended to the memory block */
+    PA_MEMBLOCK_POOL_EXTERNAL,    /* Data memory is part of the memory pool but the pa_memblock structure itself is not */
+    PA_MEMBLOCK_APPENDED,         /* The data is appended to the memory block */
     PA_MEMBLOCK_USER,             /* User supplied memory, to be freed with free_cb */
-    PA_MEMBLOCK_FIXED,            /* data is a pointer to fixed memory that needs not to be freed */
+    PA_MEMBLOCK_FIXED,            /* Data is a pointer to fixed memory that needs not to be freed */
     PA_MEMBLOCK_IMPORTED,         /* Memory is imported from another process via shm */
     PA_MEMBLOCK_TYPE_MAX
 } pa_memblock_type_t;
 
-typedef struct pa_memblock pa_memblock;
 typedef struct pa_mempool pa_mempool;
 typedef struct pa_mempool_stat pa_mempool_stat;
 typedef struct pa_memimport_segment pa_memimport_segment;
@@ -83,13 +85,13 @@ pa_memblock *pa_memblock_new(pa_mempool *, size_t length);
 pa_memblock *pa_memblock_new_pool(pa_mempool *, size_t length);
 
 /* Allocate a new memory block of type PA_MEMBLOCK_USER */
-pa_memblock *pa_memblock_new_user(pa_mempool *, void *data, size_t length, pa_free_cb_t free_cb, pa_bool_t read_only);
+pa_memblock *pa_memblock_new_user(pa_mempool *, void *data, size_t length, pa_free_cb_t free_cb, bool read_only);
 
 /* A special case of pa_memblock_new_user: take a memory buffer previously allocated with pa_xmalloc()  */
 #define pa_memblock_new_malloced(p,data,length) pa_memblock_new_user(p, data, length, pa_xfree, 0)
 
 /* Allocate a new memory block of type PA_MEMBLOCK_FIXED */
-pa_memblock *pa_memblock_new_fixed(pa_mempool *, void *data, size_t length, pa_bool_t read_only);
+pa_memblock *pa_memblock_new_fixed(pa_mempool *, void *data, size_t length, bool read_only);
 
 void pa_memblock_unref(pa_memblock*b);
 pa_memblock* pa_memblock_ref(pa_memblock*b);
@@ -97,30 +99,32 @@ pa_memblock* pa_memblock_ref(pa_memblock*b);
 /* This special unref function has to be called by the owner of the
 memory of a static memory block when he wants to release all
 references to the memory. This causes the memory to be copied and
-converted into a pool or malloc'ed memory block. Please note that this
+converted into a pool of malloc'ed memory block. Please note that this
 function is not multiple caller safe, i.e. needs to be locked
-manually if called from more than one thread at the same time.  */
+manually if called from more than one thread at the same time. */
 void pa_memblock_unref_fixed(pa_memblock*b);
 
-pa_bool_t pa_memblock_is_read_only(pa_memblock *b);
-pa_bool_t pa_memblock_is_silence(pa_memblock *b);
-pa_bool_t pa_memblock_ref_is_one(pa_memblock *b);
-void pa_memblock_set_is_silence(pa_memblock *b, pa_bool_t v);
+bool pa_memblock_is_read_only(pa_memblock *b);
+bool pa_memblock_is_silence(pa_memblock *b);
+bool pa_memblock_ref_is_one(pa_memblock *b);
+void pa_memblock_set_is_silence(pa_memblock *b, bool v);
 
 void* pa_memblock_acquire(pa_memblock *b);
+void *pa_memblock_acquire_chunk(const pa_memchunk *c);
 void pa_memblock_release(pa_memblock *b);
+
 size_t pa_memblock_get_length(pa_memblock *b);
 pa_mempool * pa_memblock_get_pool(pa_memblock *b);
 
 pa_memblock *pa_memblock_will_need(pa_memblock *b);
 
 /* The memory block manager */
-pa_mempool* pa_mempool_new(pa_bool_t shared, size_t size);
+pa_mempool* pa_mempool_new(bool shared, size_t size);
 void pa_mempool_free(pa_mempool *p);
 const pa_mempool_stat* pa_mempool_get_stat(pa_mempool *p);
 void pa_mempool_vacuum(pa_mempool *p);
 int pa_mempool_get_shm_id(pa_mempool *p, uint32_t *id);
-pa_bool_t pa_mempool_is_shared(pa_mempool *p);
+bool pa_mempool_is_shared(pa_mempool *p);
 size_t pa_mempool_block_size_max(pa_mempool *p);
 
 /* For receiving blocks from other nodes */

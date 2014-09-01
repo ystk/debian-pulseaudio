@@ -139,18 +139,10 @@ static void remove_entry(pa_idxset *s, struct idxset_entry *e) {
     s->n_entries--;
 }
 
-void pa_idxset_free(pa_idxset *s, pa_free2_cb_t free_cb, void *userdata) {
+void pa_idxset_free(pa_idxset *s, pa_free_cb_t free_cb) {
     pa_assert(s);
 
-    while (s->iterate_list_head) {
-        void *data = s->iterate_list_head->data;
-
-        remove_entry(s, s->iterate_list_head);
-
-        if (free_cb)
-            free_cb(data, userdata);
-    }
-
+    pa_idxset_remove_all(s, free_cb);
     pa_xfree(s);
 }
 
@@ -308,6 +300,19 @@ void* pa_idxset_remove_by_data(pa_idxset*s, const void *data, uint32_t *idx) {
     return r;
 }
 
+void pa_idxset_remove_all(pa_idxset *s, pa_free_cb_t free_cb) {
+    pa_assert(s);
+
+    while (s->iterate_list_head) {
+        void *data = s->iterate_list_head->data;
+
+        remove_entry(s, s->iterate_list_head);
+
+        if (free_cb)
+            free_cb(data);
+    }
+}
+
 void* pa_idxset_rrobin(pa_idxset *s, uint32_t *idx) {
     unsigned hash;
     struct idxset_entry *e;
@@ -447,13 +452,13 @@ unsigned pa_idxset_size(pa_idxset*s) {
     return s->n_entries;
 }
 
-pa_bool_t pa_idxset_isempty(pa_idxset *s) {
+bool pa_idxset_isempty(pa_idxset *s) {
     pa_assert(s);
 
     return s->n_entries == 0;
 }
 
-pa_idxset *pa_idxset_copy(pa_idxset *s) {
+pa_idxset *pa_idxset_copy(pa_idxset *s, pa_copy_func_t copy_func) {
     pa_idxset *copy;
     struct idxset_entry *i;
 
@@ -462,7 +467,7 @@ pa_idxset *pa_idxset_copy(pa_idxset *s) {
     copy = pa_idxset_new(s->hash_func, s->compare_func);
 
     for (i = s->iterate_list_head; i; i = i->iterate_next)
-        pa_idxset_put(copy, i->data, NULL);
+        pa_idxset_put(copy, copy_func ? copy_func(i->data) : i->data, NULL);
 
     return copy;
 }

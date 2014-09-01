@@ -4,12 +4,11 @@ Origin: http://svnweb.freebsd.org/ports/head/audio/pulseaudio/files/patch-src_da
 Author: Joe Marcus Clarke <marcus@FreeBSD.org>
 Author: Steven Chamberlain <steven@pyro.eu.org>
 Last-Update: 2013-04-24
+Applied-Upstream: 6.0, commit:69fae3e33ad024be39fb3da0643314abf4e59980
 
-Index: pulseaudio-2.0/src/daemon/main.c
-===================================================================
---- pulseaudio-2.0.orig/src/daemon/main.c	2012-05-13 14:26:37.000000000 +0100
-+++ pulseaudio-2.0/src/daemon/main.c	2013-04-16 00:25:32.164872810 +0100
-@@ -735,6 +735,10 @@
+--- a/src/daemon/main.c
++++ b/src/daemon/main.c
+@@ -743,6 +743,10 @@
           * first take the autospawn lock to make things
           * synchronous. */
  
@@ -20,10 +19,10 @@ Index: pulseaudio-2.0/src/daemon/main.c
          if ((autospawn_fd = pa_autospawn_lock_init()) < 0) {
              pa_log("Failed to initialize autospawn lock");
              goto finish;
-@@ -746,6 +750,7 @@
+@@ -754,6 +758,7 @@
          }
  
-         autospawn_locked = TRUE;
+         autospawn_locked = true;
 +#endif
      }
  

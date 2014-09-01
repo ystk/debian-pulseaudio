@@ -31,7 +31,6 @@
 #include <sys/types.h>
 
 #include <systemd/sd-login.h>
-#include <systemd/sd-daemon.h>
 
 #include <pulse/xmalloc.h>
 
@@ -46,7 +45,7 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("Create a client for each login session of this user");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_LOAD_ONCE(true);
 
 static const char* const valid_modargs[] = {
     NULL
@@ -141,8 +140,7 @@ static int get_session_list(struct userdata *u) {
         free(sessions);
     }
 
-    while ((o = pa_hashmap_steal_first(u->previous_sessions)))
-        free_session(o);
+    pa_hashmap_remove_all(u->previous_sessions);
 
     return 0;
 }
@@ -170,8 +168,8 @@ int pa__init(pa_module *m) {
 
     pa_assert(m);
 
-    /* If we are not actually booting with systemd become a NOP */
-    if (sd_booted() <= 0)
+    /* If we are not actually running logind become a NOP */
+    if (access("/run/systemd/seats/", F_OK) < 0)
         return 0;
 
     ma = pa_modargs_new(m->argument, valid_modargs);
@@ -189,8 +187,8 @@ int pa__init(pa_module *m) {
     m->userdata = u = pa_xnew0(struct userdata, 1);
     u->core = m->core;
     u->module = m;
-    u->sessions = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
-    u->previous_sessions = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    u->sessions = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) free_session);
+    u->previous_sessions = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) free_session);
     u->monitor = monitor;
 
     u->io = u->core->mainloop->io_new(u->core->mainloop, sd_login_monitor_get_fd(monitor), PA_IO_EVENT_INPUT, monitor_cb, u);
@@ -213,7 +211,6 @@ fail:
 
 void pa__done(pa_module *m) {
     struct userdata *u;
-    struct session *session;
 
     pa_assert(m);
 
@@ -222,15 +219,8 @@ void pa__done(pa_module *m) {
         return;
 
     if (u->sessions) {
-        while ((session = pa_hashmap_steal_first(u->sessions)))
-            free_session(session);
-
-        pa_hashmap_free(u->sessions, NULL, NULL);
-
-        while ((session = pa_hashmap_steal_first(u->previous_sessions)))
-            free_session(session);
-
-        pa_hashmap_free(u->previous_sessions, NULL, NULL);
+        pa_hashmap_free(u->sessions);
+        pa_hashmap_free(u->previous_sessions);
     }
 
     if (u->io)

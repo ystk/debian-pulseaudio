@@ -72,7 +72,7 @@ void pa_sap_context_destroy(pa_sap_context *c) {
     pa_xfree(c->sdp_data);
 }
 
-int pa_sap_send(pa_sap_context *c, pa_bool_t goodbye) {
+int pa_sap_send(pa_sap_context *c, bool goodbye) {
     uint32_t header;
     struct sockaddr_storage sa_buf;
     struct sockaddr *sa = (struct sockaddr*) &sa_buf;
@@ -141,7 +141,7 @@ pa_sap_context* pa_sap_context_init_recv(pa_sap_context *c, int fd) {
     return c;
 }
 
-int pa_sap_recv(pa_sap_context *c, pa_bool_t *goodbye) {
+int pa_sap_recv(pa_sap_context *c, bool *goodbye) {
     struct msghdr m;
     struct iovec iov;
     int size;
@@ -212,7 +212,7 @@ int pa_sap_recv(pa_sap_context *c, pa_bool_t *goodbye) {
     e = buf + k;
     size -= (int) k;
 
-    if ((unsigned) size >= sizeof(MIME_TYPE) && !strcmp(e, MIME_TYPE)) {
+    if ((unsigned) size >= sizeof(MIME_TYPE) && pa_streq(e, MIME_TYPE)) {
         e += sizeof(MIME_TYPE);
         size -= (int) sizeof(MIME_TYPE);
     } else if ((unsigned) size < sizeof(PA_SDP_HEADER)-1 || strncmp(e, PA_SDP_HEADER, sizeof(PA_SDP_HEADER)-1)) {

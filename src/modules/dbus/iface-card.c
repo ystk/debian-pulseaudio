@@ -60,6 +60,8 @@ struct pa_dbusiface_card {
     pa_card_profile *active_profile;
     pa_proplist *proplist;
 
+    pa_hook_slot *card_profile_added_slot;
+
     pa_dbus_protocol *dbus_protocol;
     pa_subscription *subscription;
 };
@@ -106,15 +108,18 @@ static pa_dbus_method_handler method_handlers[METHOD_HANDLER_MAX] = {
 
 enum signal_index {
     SIGNAL_ACTIVE_PROFILE_UPDATED,
+    SIGNAL_NEW_PROFILE,
     SIGNAL_PROPERTY_LIST_UPDATED,
     SIGNAL_MAX
 };
 
 static pa_dbus_arg_info active_profile_updated_args[] = { { "profile",       "o",      NULL } };
+static pa_dbus_arg_info new_profile_args[] =            { { "profile",       "o",      NULL } };
 static pa_dbus_arg_info property_list_updated_args[] =  { { "property_list", "a{say}", NULL } };
 
 static pa_dbus_signal_info signals[SIGNAL_MAX] = {
     [SIGNAL_ACTIVE_PROFILE_UPDATED] = { .name = "ActiveProfileUpdated", .arguments = active_profile_updated_args, .n_arguments = 1 },
+    [SIGNAL_NEW_PROFILE]            = { .name = "NewProfile",           .arguments = new_profile_args,            .n_arguments = 1 },
     [SIGNAL_PROPERTY_LIST_UPDATED]  = { .name = "PropertyListUpdated",  .arguments = property_list_updated_args,  .n_arguments = 1 }
 };
 
@@ -238,7 +243,7 @@ static const char **get_sources(pa_dbusiface_card *c, unsigned *n) {
 
     sources = pa_xnew(const char *, *n);
 
-    PA_IDXSET_FOREACH(source, c->card->sinks, idx) {
+    PA_IDXSET_FOREACH(source, c->card->sources, idx) {
         sources[i] = pa_dbusiface_core_get_source_path(c->core, source);
         ++i;
     }
@@ -309,16 +314,7 @@ static void handle_get_active_profile(DBusConnection *conn, DBusMessage *msg, vo
     pa_assert(msg);
     pa_assert(c);
 
-    if (!c->active_profile) {
-        pa_assert(pa_hashmap_isempty(c->profiles));
-
-        pa_dbus_send_error(conn, msg, PA_DBUS_ERROR_NO_SUCH_PROPERTY,
-                           "The card %s has no profiles, and therefore there's no active profile either.", c->card->name);
-        return;
-    }
-
     active_profile = pa_dbusiface_card_profile_get_path(pa_hashmap_get(c->profiles, c->active_profile->name));
-
     pa_dbus_send_basic_variant_reply(conn, msg, DBUS_TYPE_OBJECT_PATH, &active_profile);
 }
 
@@ -333,15 +329,6 @@ static void handle_set_active_profile(DBusConnection *conn, DBusMessage *msg, DB
     pa_assert(iter);
     pa_assert(c);
 
-    if (!c->active_profile) {
-        pa_assert(pa_hashmap_isempty(c->profiles));
-
-        pa_dbus_send_error(conn, msg, PA_DBUS_ERROR_NO_SUCH_PROPERTY,
-                           "The card %s has no profiles, and therefore there's no active profile either.",
-                           c->card->name);
-        return;
-    }
-
     dbus_message_iter_get_basic(iter, &new_active_path);
 
     if (!(new_active = pa_hashmap_get(c->profiles, new_active_path))) {
@@ -349,7 +336,7 @@ static void handle_set_active_profile(DBusConnection *conn, DBusMessage *msg, DB
         return;
     }
 
-    if ((r = pa_card_set_profile(c->card, pa_dbusiface_card_profile_get_name(new_active), TRUE)) < 0) {
+    if ((r = pa_card_set_profile(c->card, pa_dbusiface_card_profile_get_profile(new_active), true)) < 0) {
         pa_dbus_send_error(conn, msg, DBUS_ERROR_FAILED,
                            "Internal error in PulseAudio: pa_card_set_profile() failed with error code %i.", r);
         return;
@@ -393,8 +380,7 @@ static void handle_get_all(DBusConnection *conn, DBusMessage *msg, void *userdat
     sinks = get_sinks(c, &n_sinks);
     sources = get_sources(c, &n_sources);
     profiles = get_profiles(c, &n_profiles);
-    if (c->active_profile)
-        active_profile = pa_dbusiface_card_profile_get_path(pa_hashmap_get(c->profiles, c->active_profile->name));
+    active_profile = pa_dbusiface_card_profile_get_path(pa_hashmap_get(c->profiles, c->active_profile->name));
 
     pa_assert_se((reply = dbus_message_new_method_return(msg)));
 
@@ -411,9 +397,7 @@ static void handle_get_all(DBusConnection *conn, DBusMessage *msg, void *userdat
     pa_dbus_append_basic_array_variant_dict_entry(&dict_iter, property_handlers[PROPERTY_HANDLER_SINKS].property_name, DBUS_TYPE_OBJECT_PATH, sinks, n_sinks);
     pa_dbus_append_basic_array_variant_dict_entry(&dict_iter, property_handlers[PROPERTY_HANDLER_SOURCES].property_name, DBUS_TYPE_OBJECT_PATH, sources, n_sources);
     pa_dbus_append_basic_array_variant_dict_entry(&dict_iter, property_handlers[PROPERTY_HANDLER_PROFILES].property_name, DBUS_TYPE_OBJECT_PATH, profiles, n_profiles);
-
-    if (active_profile)
-        pa_dbus_append_basic_variant_dict_entry(&dict_iter, property_handlers[PROPERTY_HANDLER_ACTIVE_PROFILE].property_name, DBUS_TYPE_OBJECT_PATH, &active_profile);
+    pa_dbus_append_basic_variant_dict_entry(&dict_iter, property_handlers[PROPERTY_HANDLER_ACTIVE_PROFILE].property_name, DBUS_TYPE_OBJECT_PATH, &active_profile);
 
     pa_dbus_append_proplist_variant_dict_entry(&dict_iter, property_handlers[PROPERTY_HANDLER_PROPERTY_LIST].property_name, c->proplist);
 
@@ -473,8 +457,8 @@ static void subscription_cb(pa_core *core, pa_subscription_event_type_t t, uint3
         object_path = pa_dbusiface_card_profile_get_path(pa_hashmap_get(c->profiles, c->active_profile->name));
 
         pa_assert_se(signal_msg = dbus_message_new_signal(c->path,
-							  PA_DBUSIFACE_CARD_INTERFACE,
-							  signals[SIGNAL_ACTIVE_PROFILE_UPDATED].name));
+                                                          PA_DBUSIFACE_CARD_INTERFACE,
+                                                          signals[SIGNAL_ACTIVE_PROFILE_UPDATED].name));
         pa_assert_se(dbus_message_append_args(signal_msg, DBUS_TYPE_OBJECT_PATH, &object_path, DBUS_TYPE_INVALID));
 
         pa_dbus_protocol_send_signal(c->dbus_protocol, signal_msg);
@@ -488,8 +472,8 @@ static void subscription_cb(pa_core *core, pa_subscription_event_type_t t, uint3
         pa_proplist_update(c->proplist, PA_UPDATE_SET, c->card->proplist);
 
         pa_assert_se(signal_msg = dbus_message_new_signal(c->path,
-							  PA_DBUSIFACE_CARD_INTERFACE,
-							  signals[SIGNAL_PROPERTY_LIST_UPDATED].name));
+                                                          PA_DBUSIFACE_CARD_INTERFACE,
+                                                          signals[SIGNAL_PROPERTY_LIST_UPDATED].name));
         dbus_message_iter_init_append(signal_msg, &msg_iter);
         pa_dbus_append_proplist(&msg_iter, c->proplist);
 
@@ -499,8 +483,38 @@ static void subscription_cb(pa_core *core, pa_subscription_event_type_t t, uint3
     }
 }
 
+static pa_hook_result_t card_profile_added_cb(void *hook_data, void *call_data, void *slot_data) {
+    pa_core *core = hook_data;
+    pa_dbusiface_card *c = slot_data;
+    pa_card_profile *profile = call_data;
+    pa_dbusiface_card_profile *p;
+    const char *object_path;
+    DBusMessage *signal_msg;
+
+    if (profile->card != c->card)
+        return PA_HOOK_OK;
+
+    p = pa_dbusiface_card_profile_new(c, core, profile, c->next_profile_index++);
+    pa_assert_se(pa_hashmap_put(c->profiles, (char *) pa_dbusiface_card_profile_get_name(p), p) >= 0);
+
+    /* Send D-Bus signal */
+    object_path = pa_dbusiface_card_profile_get_path(p);
+
+    pa_assert_se(signal_msg = dbus_message_new_signal(c->path,
+                                                      PA_DBUSIFACE_CARD_INTERFACE,
+                                                      signals[SIGNAL_NEW_PROFILE].name));
+    pa_assert_se(dbus_message_append_args(signal_msg, DBUS_TYPE_OBJECT_PATH, &object_path, DBUS_TYPE_INVALID));
+
+    pa_dbus_protocol_send_signal(c->dbus_protocol, signal_msg);
+    dbus_message_unref(signal_msg);
+
+    return PA_HOOK_OK;
+}
+
 pa_dbusiface_card *pa_dbusiface_card_new(pa_dbusiface_core *core, pa_card *card) {
     pa_dbusiface_card *c = NULL;
+    pa_card_profile *profile;
+    void *state;
 
     pa_assert(core);
     pa_assert(card);
@@ -509,35 +523,25 @@ pa_dbusiface_card *pa_dbusiface_card_new(pa_dbusiface_core *core, pa_card *card)
     c->core = core;
     c->card = card;
     c->path = pa_sprintf_malloc("%s/%s%u", PA_DBUS_CORE_OBJECT_PATH, OBJECT_NAME, card->index);
-    c->profiles = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    c->profiles = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL,
+                                      (pa_free_cb_t) pa_dbusiface_card_profile_free);
     c->next_profile_index = 0;
-    c->active_profile = NULL;
+    c->active_profile = card->active_profile;
     c->proplist = pa_proplist_copy(card->proplist);
     c->dbus_protocol = pa_dbus_protocol_get(card->core);
     c->subscription = pa_subscription_new(card->core, PA_SUBSCRIPTION_MASK_CARD, subscription_cb, c);
 
-    if (card->profiles) {
-        pa_card_profile *profile;
-        void *state = NULL;
-
-        PA_HASHMAP_FOREACH(profile, card->profiles, state) {
-            pa_dbusiface_card_profile *p = pa_dbusiface_card_profile_new(c, card->core, profile, c->next_profile_index++);
-            pa_hashmap_put(c->profiles, pa_dbusiface_card_profile_get_name(p), p);
-        }
-        pa_assert_se(c->active_profile = card->active_profile);
+    PA_HASHMAP_FOREACH(profile, card->profiles, state) {
+        pa_dbusiface_card_profile *p = pa_dbusiface_card_profile_new(c, card->core, profile, c->next_profile_index++);
+        pa_hashmap_put(c->profiles, (char *) pa_dbusiface_card_profile_get_name(p), p);
     }
 
     pa_assert_se(pa_dbus_protocol_add_interface(c->dbus_protocol, c->path, &card_interface_info, c) >= 0);
 
+    c->card_profile_added_slot = pa_hook_connect(&card->core->hooks[PA_CORE_HOOK_CARD_PROFILE_ADDED], PA_HOOK_NORMAL,
+                                                 card_profile_added_cb, c);
+
     return c;
-}
-
-static void profile_free_cb(void *p, void *userdata) {
-    pa_dbusiface_card_profile *profile = p;
-
-    pa_assert(profile);
-
-    pa_dbusiface_card_profile_free(profile);
 }
 
 void pa_dbusiface_card_free(pa_dbusiface_card *c) {
@@ -545,7 +549,9 @@ void pa_dbusiface_card_free(pa_dbusiface_card *c) {
 
     pa_assert_se(pa_dbus_protocol_remove_interface(c->dbus_protocol, c->path, card_interface_info.name) >= 0);
 
-    pa_hashmap_free(c->profiles, profile_free_cb, NULL);
+    pa_hook_slot_free(c->card_profile_added_slot);
+
+    pa_hashmap_free(c->profiles);
     pa_proplist_free(c->proplist);
     pa_dbus_protocol_unref(c->dbus_protocol);
     pa_subscription_free(c->subscription);

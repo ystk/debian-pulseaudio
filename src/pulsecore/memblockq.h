@@ -37,7 +37,6 @@
 
 typedef struct pa_memblockq pa_memblockq;
 
-
 /* Parameters:
 
    - name:      name for debugging purposes
@@ -51,7 +50,7 @@ typedef struct pa_memblockq pa_memblockq;
 
    - ss:        Sample spec describing the queue contents. Only multiples
                 of the frame size as implied by the sample spec are
-                popped from the queue or should be pushed into it.
+                allowed into the queue or can be popped from it.
 
    - prebuf:    If the queue runs empty wait until this many bytes are in
                 queue again before passing the first byte out. If set
@@ -88,7 +87,7 @@ int pa_memblockq_push(pa_memblockq* bq, const pa_memchunk *chunk);
 int pa_memblockq_push_align(pa_memblockq* bq, const pa_memchunk *chunk);
 
 /* Manipulate the write pointer */
-void pa_memblockq_seek(pa_memblockq *bq, int64_t offset, pa_seek_mode_t seek, pa_bool_t account);
+void pa_memblockq_seek(pa_memblockq *bq, int64_t offset, pa_seek_mode_t seek, bool account);
 
 /* Return a copy of the next memory chunk in the queue. It is not
  * removed from the queue. There are two reasons this function might
@@ -110,7 +109,7 @@ void pa_memblockq_drop(pa_memblockq *bq, size_t length);
 void pa_memblockq_rewind(pa_memblockq *bq, size_t length);
 
 /* Test if the pa_memblockq is currently readable, that is, more data than base */
-pa_bool_t pa_memblockq_is_readable(pa_memblockq *bq);
+bool pa_memblockq_is_readable(pa_memblockq *bq);
 
 /* Return the length of the queue in bytes */
 size_t pa_memblockq_get_length(pa_memblockq *bq);
@@ -126,7 +125,7 @@ size_t pa_memblockq_pop_missing(pa_memblockq *bq);
 int pa_memblockq_splice(pa_memblockq *bq, pa_memblockq *source);
 
 /* Set the queue to silence, set write index to read index */
-void pa_memblockq_flush_write(pa_memblockq *bq, pa_bool_t account);
+void pa_memblockq_flush_write(pa_memblockq *bq, bool account);
 
 /* Set the queue to silence, set write read index to write index*/
 void pa_memblockq_flush_read(pa_memblockq *bq);
@@ -164,8 +163,8 @@ int64_t pa_memblockq_get_write_index(pa_memblockq *bq);
 /* Change metrics. Always call in order. */
 void pa_memblockq_set_maxlength(pa_memblockq *memblockq, size_t maxlength); /* might modify tlength, prebuf, minreq too */
 void pa_memblockq_set_tlength(pa_memblockq *memblockq, size_t tlength); /* might modify minreq, too */
-void pa_memblockq_set_prebuf(pa_memblockq *memblockq, size_t prebuf); /* might modify minreq, too */
-void pa_memblockq_set_minreq(pa_memblockq *memblockq, size_t minreq);
+void pa_memblockq_set_minreq(pa_memblockq *memblockq, size_t minreq); /* might modify prebuf, too */
+void pa_memblockq_set_prebuf(pa_memblockq *memblockq, size_t prebuf);
 void pa_memblockq_set_maxrewind(pa_memblockq *memblockq, size_t maxrewind); /* Set the maximum history size */
 void pa_memblockq_set_silence(pa_memblockq *memblockq, pa_memchunk *silence);
 
@@ -179,13 +178,13 @@ void pa_memblockq_willneed(pa_memblockq *bq);
 /* Check whether the memblockq is completely empty, i.e. no data
  * neither left nor right of the read pointer, and hence no buffered
  * data for the future nor data in the backlog. */
-pa_bool_t pa_memblockq_is_empty(pa_memblockq *bq);
+bool pa_memblockq_is_empty(pa_memblockq *bq);
 
 /* Drop everything in the queue, but don't modify the indexes */
 void pa_memblockq_silence(pa_memblockq *bq);
 
 /* Check whether we currently are in prebuf state */
-pa_bool_t pa_memblockq_prebuf_active(pa_memblockq *bq);
+bool pa_memblockq_prebuf_active(pa_memblockq *bq);
 
 /* Return how many items are currently stored in the queue */
 unsigned pa_memblockq_get_nblocks(pa_memblockq *bq);

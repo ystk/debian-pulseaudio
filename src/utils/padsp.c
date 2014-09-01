@@ -922,8 +922,21 @@ static int fd_info_copy_data(fd_info *i, int force) {
                 return -1;
             }
 
-            if (!data)
+            if (len <= 0)
                 break;
+
+            if (!data) {
+                /* Maybe we should generate silence here, but I'm lazy and
+                 * I'll just skip any holes in the stream. */
+                if (pa_stream_drop(i->rec_stream) < 0) {
+                    debug(DEBUG_LEVEL_NORMAL, __FILE__": pa_stream_drop(): %s\n", pa_strerror(pa_context_errno(i->context)));
+                    return -1;
+                }
+
+                assert(n >= len);
+                n -= len;
+                continue;
+            }
 
             buf = (const char*)data + i->rec_offset;
 
@@ -1513,7 +1526,7 @@ int open(const char *filename, int flags, ...) {
     return real_open(filename, flags, mode);
 }
 
-static pa_bool_t is_audio_device_node(const char *path) {
+static bool is_audio_device_node(const char *path) {
     return
         pa_streq(path, "/dev/dsp") ||
         pa_streq(path, "/dev/adsp") ||

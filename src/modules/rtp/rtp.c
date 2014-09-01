@@ -88,7 +88,7 @@ int pa_rtp_send(pa_rtp_context *c, size_t size, pa_memblockq *q) {
 
             pa_assert(chunk.memblock);
 
-            iov[iov_idx].iov_base = ((uint8_t*) pa_memblock_acquire(chunk.memblock) + chunk.index);
+            iov[iov_idx].iov_base = pa_memblock_acquire_chunk(&chunk);
             iov[iov_idx].iov_len = k;
             mb[iov_idx] = chunk.memblock;
             iov_idx ++;
@@ -170,7 +170,7 @@ int pa_rtp_recv(pa_rtp_context *c, pa_memchunk *chunk, pa_mempool *pool, struct 
     unsigned cc;
     ssize_t r;
     uint8_t aux[1024];
-    pa_bool_t found_tstamp = FALSE;
+    bool found_tstamp = false;
 
     pa_assert(c);
     pa_assert(chunk);
@@ -203,7 +203,7 @@ int pa_rtp_recv(pa_rtp_context *c, pa_memchunk *chunk, pa_mempool *pool, struct 
     chunk->memblock = pa_memblock_ref(c->memchunk.memblock);
     chunk->index = c->memchunk.index;
 
-    iov.iov_base = (uint8_t*) pa_memblock_acquire(chunk->memblock) + chunk->index;
+    iov.iov_base = pa_memblock_acquire_chunk(chunk);
     iov.iov_len = (size_t) size;
 
     m.msg_name = NULL;
@@ -280,13 +280,13 @@ int pa_rtp_recv(pa_rtp_context *c, pa_memchunk *chunk, pa_mempool *pool, struct 
     for (cm = CMSG_FIRSTHDR(&m); cm; cm = CMSG_NXTHDR(&m, cm))
         if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_TIMESTAMP) {
             memcpy(tstamp, CMSG_DATA(cm), sizeof(struct timeval));
-            found_tstamp = TRUE;
+            found_tstamp = true;
             break;
         }
 
     if (!found_tstamp) {
         pa_log_warn("Couldn't find SCM_TIMESTAMP data in auxiliary recvmsg() data!");
-        memset(tstamp, 0, sizeof(tstamp));
+        pa_zero(*tstamp);
     }
 
     return 0;
@@ -398,13 +398,13 @@ const char* pa_rtp_format_to_string(pa_sample_format_t f) {
 pa_sample_format_t pa_rtp_string_to_format(const char *s) {
     pa_assert(s);
 
-    if (!(strcmp(s, "L16")))
+    if (pa_streq(s, "L16"))
         return PA_SAMPLE_S16BE;
-    else if (!strcmp(s, "L8"))
+    else if (pa_streq(s, "L8"))
         return PA_SAMPLE_U8;
-    else if (!strcmp(s, "PCMA"))
+    else if (pa_streq(s, "PCMA"))
         return PA_SAMPLE_ALAW;
-    else if (!strcmp(s, "PCMU"))
+    else if (pa_streq(s, "PCMU"))
         return PA_SAMPLE_ULAW;
     else
         return PA_SAMPLE_INVALID;

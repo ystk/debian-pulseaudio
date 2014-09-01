@@ -26,12 +26,48 @@
 
 PA_DEFINE_PUBLIC_CLASS(pa_device_port, pa_object);
 
-void pa_device_port_set_available(pa_device_port *p, pa_port_available_t status)
-{
-    uint32_t state;
-    pa_card *card;
-/*    pa_source *source;
-    pa_sink *sink; */
+pa_device_port_new_data *pa_device_port_new_data_init(pa_device_port_new_data *data) {
+    pa_assert(data);
+
+    pa_zero(*data);
+    data->available = PA_AVAILABLE_UNKNOWN;
+    return data;
+}
+
+void pa_device_port_new_data_set_name(pa_device_port_new_data *data, const char *name) {
+    pa_assert(data);
+
+    pa_xfree(data->name);
+    data->name = pa_xstrdup(name);
+}
+
+void pa_device_port_new_data_set_description(pa_device_port_new_data *data, const char *description) {
+    pa_assert(data);
+
+    pa_xfree(data->description);
+    data->description = pa_xstrdup(description);
+}
+
+void pa_device_port_new_data_set_available(pa_device_port_new_data *data, pa_available_t available) {
+    pa_assert(data);
+
+    data->available = available;
+}
+
+void pa_device_port_new_data_set_direction(pa_device_port_new_data *data, pa_direction_t direction) {
+    pa_assert(data);
+
+    data->direction = direction;
+}
+
+void pa_device_port_new_data_done(pa_device_port_new_data *data) {
+    pa_assert(data);
+
+    pa_xfree(data->name);
+    pa_xfree(data->description);
+}
+
+void pa_device_port_set_available(pa_device_port *p, pa_available_t status) {
     pa_core *core;
 
     pa_assert(p);
@@ -39,28 +75,15 @@ void pa_device_port_set_available(pa_device_port *p, pa_port_available_t status)
     if (p->available == status)
         return;
 
-/*    pa_assert(status != PA_PORT_AVAILABLE_UNKNOWN); */
+/*    pa_assert(status != PA_AVAILABLE_UNKNOWN); */
 
     p->available = status;
-    pa_log_debug("Setting port %s to status %s", p->name, status == PA_PORT_AVAILABLE_YES ? "yes" :
-       status == PA_PORT_AVAILABLE_NO ? "no" : "unknown");
+    pa_log_debug("Setting port %s to status %s", p->name, status == PA_AVAILABLE_YES ? "yes" :
+       status == PA_AVAILABLE_NO ? "no" : "unknown");
 
     /* Post subscriptions to the card which owns us */
     pa_assert_se(core = p->core);
-    PA_IDXSET_FOREACH(card, core->cards, state)
-        if (p == pa_hashmap_get(card->ports, p->name))
-            pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, card->index);
-#if 0
-/* This stuff is temporarily commented out while figuring out whether to actually do this */
-    if (p->is_output)
-        PA_IDXSET_FOREACH(sink, core->sinks, state)
-            if (p == pa_hashmap_get(sink->ports, p->name))
-                pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_SINK|PA_SUBSCRIPTION_EVENT_CHANGE, sink->index);
-    if (p->is_input)
-        PA_IDXSET_FOREACH(source, core->sources, state)
-            if (p == pa_hashmap_get(source->ports, p->name))
-                pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_SOURCE|PA_SUBSCRIPTION_EVENT_CHANGE, source->index);
-#endif
+    pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, p->card->index);
 
     pa_hook_fire(&core->hooks[PA_CORE_HOOK_PORT_AVAILABLE_CHANGED], p);
 }
@@ -73,42 +96,83 @@ static void device_port_free(pa_object *o) {
 
     if (p->proplist)
         pa_proplist_free(p->proplist);
+
     if (p->profiles)
-        pa_hashmap_free(p->profiles, NULL, NULL);
+        pa_hashmap_free(p->profiles);
+
     pa_xfree(p->name);
     pa_xfree(p->description);
     pa_xfree(p);
 }
 
-
-pa_device_port *pa_device_port_new(pa_core *c, const char *name, const char *description, size_t extra) {
+pa_device_port *pa_device_port_new(pa_core *c, pa_device_port_new_data *data, size_t extra) {
     pa_device_port *p;
 
-    pa_assert(name);
+    pa_assert(data);
+    pa_assert(data->name);
+    pa_assert(data->description);
+    pa_assert(data->direction == PA_DIRECTION_OUTPUT || data->direction == PA_DIRECTION_INPUT);
 
     p = PA_DEVICE_PORT(pa_object_new_internal(PA_ALIGN(sizeof(pa_device_port)) + extra, pa_device_port_type_id, pa_device_port_check_type));
     p->parent.free = device_port_free;
 
-    p->name = pa_xstrdup(name);
-    p->description = pa_xstrdup(description);
+    p->name = data->name;
+    data->name = NULL;
+    p->description = data->description;
+    data->description = NULL;
     p->core = c;
+    p->card = NULL;
     p->priority = 0;
-    p->available = PA_PORT_AVAILABLE_UNKNOWN;
-    p->profiles = NULL;
-    p->is_input = FALSE;
-    p->is_output = FALSE;
+    p->available = data->available;
+    p->profiles = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    p->direction = data->direction;
+
+    p->latency_offset = 0;
     p->proplist = pa_proplist_new();
 
     return p;
 }
 
-void pa_device_port_hashmap_free(pa_hashmap *h) {
-    pa_device_port *p;
+void pa_device_port_set_latency_offset(pa_device_port *p, int64_t offset) {
+    uint32_t state;
+    pa_core *core;
 
-    pa_assert(h);
+    pa_assert(p);
 
-    while ((p = pa_hashmap_steal_first(h)))
-        pa_device_port_unref(p);
+    if (offset == p->latency_offset)
+        return;
 
-    pa_hashmap_free(h, NULL, NULL);
+    p->latency_offset = offset;
+
+    switch (p->direction) {
+        case PA_DIRECTION_OUTPUT: {
+            pa_sink *sink;
+
+            PA_IDXSET_FOREACH(sink, p->core->sinks, state) {
+                if (sink->active_port == p) {
+                    pa_sink_set_latency_offset(sink, p->latency_offset);
+                    break;
+                }
+            }
+
+            break;
+        }
+
+        case PA_DIRECTION_INPUT: {
+            pa_source *source;
+
+            PA_IDXSET_FOREACH(source, p->core->sources, state) {
+                if (source->active_port == p) {
+                    pa_source_set_latency_offset(source, p->latency_offset);
+                    break;
+                }
+            }
+
+            break;
+        }
+    }
+
+    pa_assert_se(core = p->core);
+    pa_subscription_post(core, PA_SUBSCRIPTION_EVENT_CARD|PA_SUBSCRIPTION_EVENT_CHANGE, p->card->index);
+    pa_hook_fire(&core->hooks[PA_CORE_HOOK_PORT_LATENCY_OFFSET_CHANGED], p);
 }

@@ -53,7 +53,7 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("UNIX pipe source");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(FALSE);
+PA_MODULE_LOAD_ONCE(false);
 PA_MODULE_USAGE(
         "source_name=<name for the source> "
         "source_properties=<properties for the source> "
@@ -184,7 +184,7 @@ static void thread_func(void *userdata) {
         /* Hmm, nothing to do. Let's sleep */
         pollfd->events = (short) (u->source->thread_info.state == PA_SOURCE_RUNNING ? POLLIN : 0);
 
-        if ((ret = pa_rtpoll_run(u->rtpoll, TRUE)) < 0)
+        if ((ret = pa_rtpoll_run(u->rtpoll, true)) < 0)
             goto fail;
 
         if (ret == 0)
@@ -208,7 +208,7 @@ finish:
     pa_log_debug("Thread shutting down");
 }
 
-int pa__init(pa_module*m) {
+int pa__init(pa_module *m) {
     struct userdata *u;
     struct stat st;
     pa_sample_spec ss;
@@ -220,14 +220,14 @@ int pa__init(pa_module*m) {
     pa_assert(m);
 
     if (!(ma = pa_modargs_new(m->argument, valid_modargs))) {
-        pa_log("failed to parse module arguments.");
+        pa_log("Failed to parse module arguments.");
         goto fail;
     }
 
     ss = m->core->default_sample_spec;
     map = m->core->default_channel_map;
     if (pa_modargs_get_sample_spec_and_channel_map(ma, &ss, &map, PA_CHANNEL_MAP_DEFAULT) < 0) {
-        pa_log("invalid sample format specification or channel map");
+        pa_log("Invalid sample format specification or channel map");
         goto fail;
     }
 
@@ -240,7 +240,10 @@ int pa__init(pa_module*m) {
 
     u->filename = pa_runtime_path(pa_modargs_get_value(ma, "file", DEFAULT_FILE_NAME));
 
-    mkfifo(u->filename, 0666);
+    if (mkfifo(u->filename, 0666) < 0) {
+        pa_log("mkfifo('%s'): %s", u->filename, pa_cstrerror(errno));
+        goto fail;
+    }
     if ((u->fd = pa_open_cloexec(u->filename, O_RDWR, 0)) < 0) {
         pa_log("open('%s'): %s", u->filename, pa_cstrerror(errno));
         goto fail;
@@ -249,7 +252,7 @@ int pa__init(pa_module*m) {
     pa_make_fd_nonblock(u->fd);
 
     if (fstat(u->fd, &st) < 0) {
-        pa_log("fstat('%s'): %s",u->filename, pa_cstrerror(errno));
+        pa_log("fstat('%s'): %s", u->filename, pa_cstrerror(errno));
         goto fail;
     }
 
@@ -322,7 +325,7 @@ int pa__get_n_used(pa_module *m) {
     return pa_source_linked_by(u->source);
 }
 
-void pa__done(pa_module*m) {
+void pa__done(pa_module *m) {
     struct userdata *u;
 
     pa_assert(m);

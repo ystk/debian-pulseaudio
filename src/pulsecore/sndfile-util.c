@@ -144,7 +144,6 @@ int pa_sndfile_write_sample_spec(SF_INFO *sfi, pa_sample_spec *ss) {
             break;
     }
 
-
     if (!pa_sample_spec_valid(ss))
         return -1;
 
@@ -385,6 +384,7 @@ pa_sndfile_readf_t pa_sndfile_readf_function(const pa_sample_spec *ss) {
 
         case PA_SAMPLE_ULAW:
         case PA_SAMPLE_ALAW:
+        case PA_SAMPLE_S24NE:
             return NULL;
 
         default:
@@ -408,6 +408,7 @@ pa_sndfile_writef_t pa_sndfile_writef_function(const pa_sample_spec *ss) {
 
         case PA_SAMPLE_ULAW:
         case PA_SAMPLE_ALAW:
+        case PA_SAMPLE_S24NE:
             return NULL;
 
         default:
@@ -418,13 +419,11 @@ pa_sndfile_writef_t pa_sndfile_writef_function(const pa_sample_spec *ss) {
 int pa_sndfile_format_from_string(const char *name) {
     int i, count = 0;
 
-
     if (!name[0])
         return -1;
 
     pa_assert_se(sf_command(NULL, SFC_GET_FORMAT_MAJOR_COUNT, &count, sizeof(int)) == 0);
 
-    /* First try to match via full type string */
     for (i = 0; i < count; i++) {
         SF_FORMAT_INFO fi;
         pa_zero(fi);
@@ -432,30 +431,15 @@ int pa_sndfile_format_from_string(const char *name) {
 
         pa_assert_se(sf_command(NULL, SFC_GET_FORMAT_MAJOR, &fi, sizeof(fi)) == 0);
 
+        /* First try to match via full type string */
         if (strcasecmp(name, fi.name) == 0)
             return fi.format;
-    }
 
-    /* Then, try to match via the full extension */
-    for (i = 0; i < count; i++) {
-        SF_FORMAT_INFO fi;
-        pa_zero(fi);
-        fi.format = i;
-
-        pa_assert_se(sf_command(NULL, SFC_GET_FORMAT_MAJOR, &fi, sizeof(fi)) == 0);
-
+        /* Then, try to match via the full extension */
         if (strcasecmp(name, fi.extension) == 0)
             return fi.format;
-    }
 
-    /* Then, try to match via the start of the type string */
-    for (i = 0; i < count; i++) {
-        SF_FORMAT_INFO fi;
-        pa_zero(fi);
-        fi.format = i;
-
-        pa_assert_se(sf_command(NULL, SFC_GET_FORMAT_MAJOR, &fi, sizeof(fi)) == 0);
-
+        /* Then, try to match via the start of the type string */
         if (strncasecmp(name, fi.name, strlen(name)) == 0)
             return fi.format;
     }

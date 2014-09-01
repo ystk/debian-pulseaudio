@@ -40,7 +40,8 @@ typedef enum pa_cpu_x86_flag {
     PA_CPU_X86_CMOV      = (1 << 10)
 } pa_cpu_x86_flag_t;
 
-pa_bool_t pa_cpu_init_x86 (pa_cpu_x86_flag_t *flags);
+void pa_cpu_get_x86_flags(pa_cpu_x86_flag_t *flags);
+bool pa_cpu_init_x86 (pa_cpu_x86_flag_t *flags);
 
 #if defined (__i386__)
 typedef int32_t pa_reg_x86;

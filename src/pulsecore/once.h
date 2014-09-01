@@ -23,21 +23,21 @@
 ***/
 
 #include <pulsecore/atomic.h>
+#include <pulsecore/mutex.h>
 
 typedef struct pa_once {
-    pa_atomic_ptr_t mutex;
-    pa_atomic_t ref, done;
+    pa_static_mutex mutex;
+    pa_atomic_t done;
 } pa_once;
 
 #define PA_ONCE_INIT                                                    \
     {                                                                   \
-        .mutex = PA_ATOMIC_PTR_INIT(NULL),                              \
-        .ref = PA_ATOMIC_INIT(0),                                       \
+        .mutex = PA_STATIC_MUTEX_INIT,                                  \
         .done = PA_ATOMIC_INIT(0)                                       \
     }
 
 /* Not to be called directly, use the macros defined below instead */
-pa_bool_t pa_once_begin(pa_once *o);
+bool pa_once_begin(pa_once *o);
 void pa_once_end(pa_once *o);
 
 #define PA_ONCE_BEGIN                                                   \

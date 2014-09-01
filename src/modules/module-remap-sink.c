@@ -38,7 +38,7 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("Virtual channel remapping sink");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(FALSE);
+PA_MODULE_LOAD_ONCE(false);
 PA_MODULE_USAGE(
         "sink_name=<name for the sink> "
         "sink_properties=<properties for the sink> "
@@ -48,6 +48,7 @@ PA_MODULE_USAGE(
         "rate=<sample rate> "
         "channels=<number of channels> "
         "channel_map=<channel map> "
+        "resample_method=<resampler> "
         "remix=<remix channels?>");
 
 struct userdata {
@@ -56,7 +57,7 @@ struct userdata {
     pa_sink *sink;
     pa_sink_input *sink_input;
 
-    pa_bool_t auto_desc;
+    bool auto_desc;
 };
 
 static const char* const valid_modargs[] = {
@@ -68,6 +69,7 @@ static const char* const valid_modargs[] = {
     "rate",
     "channels",
     "channel_map",
+    "resample_method",
     "remix",
     NULL
 };
@@ -127,7 +129,7 @@ static void sink_request_rewind(pa_sink *s) {
         !PA_SINK_INPUT_IS_LINKED(u->sink_input->thread_info.state))
         return;
 
-    pa_sink_input_request_rewind(u->sink_input, s->thread_info.rewind_nbytes, TRUE, FALSE, FALSE);
+    pa_sink_input_request_rewind(u->sink_input, s->thread_info.rewind_nbytes, true, false, false);
 }
 
 /* Called from I/O thread context */
@@ -185,6 +187,8 @@ static void sink_input_update_max_rewind_cb(pa_sink_input *i, size_t nbytes) {
     pa_sink_input_assert_ref(i);
     pa_assert_se(u = i->userdata);
 
+    /* FIXME: Too small max_rewind:
+     * https://bugs.freedesktop.org/show_bug.cgi?id=53709 */
     pa_sink_set_max_rewind_within_thread(u->sink, nbytes);
 }
 
@@ -241,6 +245,9 @@ static void sink_input_attach_cb(pa_sink_input *i) {
     pa_sink_set_latency_range_within_thread(u->sink, i->sink->thread_info.min_latency, i->sink->thread_info.max_latency);
     pa_sink_set_fixed_latency_within_thread(u->sink, i->sink->thread_info.fixed_latency);
     pa_sink_set_max_request_within_thread(u->sink, pa_sink_input_get_max_request(i));
+
+    /* FIXME: Too small max_rewind:
+     * https://bugs.freedesktop.org/show_bug.cgi?id=53709 */
     pa_sink_set_max_rewind_within_thread(u->sink, pa_sink_input_get_max_rewind(i));
 
     pa_sink_attach_within_thread(u->sink);
@@ -265,7 +272,7 @@ static void sink_input_kill_cb(pa_sink_input *i) {
     pa_sink_unref(u->sink);
     u->sink = NULL;
 
-    pa_module_unload_request(u->module, TRUE);
+    pa_module_unload_request(u->module, true);
 }
 
 /* Called from IO thread context */
@@ -280,18 +287,8 @@ static void sink_input_state_change_cb(pa_sink_input *i, pa_sink_input_state_t s
     if (PA_SINK_INPUT_IS_LINKED(state) &&
         i->thread_info.state == PA_SINK_INPUT_INIT) {
         pa_log_debug("Requesting rewind due to state change.");
-        pa_sink_input_request_rewind(i, 0, FALSE, TRUE, TRUE);
+        pa_sink_input_request_rewind(i, 0, false, true, true);
     }
-}
-
-/* Called from main context */
-static pa_bool_t sink_input_may_move_to_cb(pa_sink_input *i, pa_sink *dest) {
-    struct userdata *u;
-
-    pa_sink_input_assert_ref(i);
-    pa_assert_se(u = i->userdata);
-
-    return u->sink != dest;
 }
 
 /* Called from main context */
@@ -323,12 +320,13 @@ static void sink_input_moving_cb(pa_sink_input *i, pa_sink *dest) {
 int pa__init(pa_module*m) {
     struct userdata *u;
     pa_sample_spec ss;
+    pa_resample_method_t resample_method = PA_RESAMPLER_INVALID;
     pa_channel_map sink_map, stream_map;
     pa_modargs *ma;
     pa_sink *master;
     pa_sink_input_new_data sink_input_data;
     pa_sink_new_data sink_data;
-    pa_bool_t remix = TRUE;
+    bool remix = true;
 
     pa_assert(m);
 
@@ -365,6 +363,11 @@ int pa__init(pa_module*m) {
 
     if (pa_modargs_get_value_boolean(ma, "remix", &remix) < 0) {
         pa_log("Invalid boolean remix parameter");
+        goto fail;
+    }
+
+    if (pa_modargs_get_resample_method(ma, &resample_method) < 0) {
+        pa_log("Invalid resampling method");
         goto fail;
     }
 
@@ -416,13 +419,14 @@ int pa__init(pa_module*m) {
     pa_sink_input_new_data_init(&sink_input_data);
     sink_input_data.driver = __FILE__;
     sink_input_data.module = m;
-    pa_sink_input_new_data_set_sink(&sink_input_data, master, FALSE);
+    pa_sink_input_new_data_set_sink(&sink_input_data, master, false);
     sink_input_data.origin_sink = u->sink;
     pa_proplist_sets(sink_input_data.proplist, PA_PROP_MEDIA_NAME, "Remapped Stream");
     pa_proplist_sets(sink_input_data.proplist, PA_PROP_MEDIA_ROLE, "filter");
     pa_sink_input_new_data_set_sample_spec(&sink_input_data, &ss);
     pa_sink_input_new_data_set_channel_map(&sink_input_data, &stream_map);
     sink_input_data.flags = (remix ? 0 : PA_SINK_INPUT_NO_REMIX);
+    sink_input_data.resample_method = resample_method;
 
     pa_sink_input_new(&u->sink_input, m->core, &sink_input_data);
     pa_sink_input_new_data_done(&sink_input_data);
@@ -440,7 +444,6 @@ int pa__init(pa_module*m) {
     u->sink_input->detach = sink_input_detach_cb;
     u->sink_input->kill = sink_input_kill_cb;
     u->sink_input->state_change = sink_input_state_change_cb;
-    u->sink_input->may_move_to = sink_input_may_move_to_cb;
     u->sink_input->moving = sink_input_moving_cb;
     u->sink_input->userdata = u;
 

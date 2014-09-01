@@ -56,7 +56,7 @@ struct pa_simple {
                 *(rerror) = error;                                      \
             return (ret);                                               \
         }                                                               \
-    } while(FALSE);
+    } while(false);
 
 #define CHECK_SUCCESS_GOTO(p, rerror, expression, label)        \
     do {                                                        \
@@ -65,7 +65,7 @@ struct pa_simple {
                 *(rerror) = pa_context_errno((p)->context);     \
             goto label;                                         \
         }                                                       \
-    } while(FALSE);
+    } while(false);
 
 #define CHECK_DEAD_GOTO(p, rerror, label)                               \
     do {                                                                \
@@ -80,7 +80,7 @@ struct pa_simple {
                     *(rerror) = PA_ERR_BADSTATE;                        \
             goto label;                                                 \
         }                                                               \
-    } while(FALSE);
+    } while(false);
 
 static void context_state_cb(pa_context *c, void *userdata) {
     pa_simple *p = userdata;
@@ -331,9 +331,14 @@ int pa_simple_read(pa_simple *p, void*data, size_t length, int *rerror) {
             r = pa_stream_peek(p->stream, &p->read_data, &p->read_length);
             CHECK_SUCCESS_GOTO(p, rerror, r == 0, unlock_and_fail);
 
-            if (!p->read_data) {
+            if (p->read_length <= 0) {
                 pa_threaded_mainloop_wait(p->mainloop);
                 CHECK_DEAD_GOTO(p, rerror, unlock_and_fail);
+            } else if (!p->read_data) {
+                /* There's a hole in the stream, skip it. We could generate
+                 * silence, but that wouldn't work for compressed streams. */
+                r = pa_stream_drop(p->stream);
+                CHECK_SUCCESS_GOTO(p, rerror, r == 0, unlock_and_fail);
             } else
                 p->read_index = 0;
         }
@@ -417,8 +422,6 @@ int pa_simple_flush(pa_simple *p, int *rerror) {
     pa_operation *o = NULL;
 
     pa_assert(p);
-
-    CHECK_VALIDITY_RETURN_ANY(rerror, p->direction == PA_STREAM_PLAYBACK, PA_ERR_BADSTATE, -1);
 
     pa_threaded_mainloop_lock(p->mainloop);
     CHECK_DEAD_GOTO(p, rerror, unlock_and_fail);

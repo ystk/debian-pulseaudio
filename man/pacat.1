@@ -41,6 +41,9 @@ Choose the server to connect to.
 \fB-d | --device\f1\fI=SINKORSOURCE\f1
 Specify the symbolic name of the sink/source to play/record this stream on/from.
 .TP
+\fB--monitor-stream\f1\fI=INDEX\f1
+Record from the sink input with index INDEX.
+.TP
 \fB-n | --client-name\f1\fI=NAME\f1
 Specify the client name \fIpaplay\f1 shall pass to the server when connecting.
 .TP
@@ -54,7 +57,7 @@ Specify the initial playback volume to use. Choose a value between 0 (silent) an
 Capture or play back audio with the specified sample rate. Defaults to 44100 Hz.
 .TP
 \fB--format\f1\fI=FORMAT\f1
-Capture or play back audio with the specified sample format. Specify one of \fBu8\f1, \fBs16le\f1, \fBs16be\f1, \fBs32le\f1, \fBs32be\f1, \fBfloat32le\f1, \fBfloat32be\f1, \fBulaw\f1, \fBalaw\f1, \fBs32le\f1, \fBs32be\f1, \fBs24le\f1, \fBs24be\f1, \fBs24-32le\f1, \fBs24-32be\f1. Depending on the endianess of the CPU the formats \fBs16ne\f1, \fBs16re\f1, \fBs32ne\f1, \fBs32re\f1, \fBfloat32ne\f1, \fBfloat32re\f1, \fBs32ne\f1, \fBs32re\f1, \fBs24ne\f1, \fBs24re\f1, \fBs24-32ne\f1, \fBs24-32re\f1 (for native, resp. reverse endian) are available as aliases. Defaults to s16ne.
+Capture or play back audio with the specified sample format. Specify one of \fBu8\f1, \fBs16le\f1, \fBs16be\f1, \fBs32le\f1, \fBs32be\f1, \fBfloat32le\f1, \fBfloat32be\f1, \fBulaw\f1, \fBalaw\f1, \fBs32le\f1, \fBs32be\f1, \fBs24le\f1, \fBs24be\f1, \fBs24-32le\f1, \fBs24-32be\f1. Depending on the endianness of the CPU the formats \fBs16ne\f1, \fBs16re\f1, \fBs32ne\f1, \fBs32re\f1, \fBfloat32ne\f1, \fBfloat32re\f1, \fBs32ne\f1, \fBs32re\f1, \fBs24ne\f1, \fBs24re\f1, \fBs24-32ne\f1, \fBs24-32re\f1 (for native, resp. reverse endian) are available as aliases. Defaults to s16ne.
 .TP
 \fB--channels\f1\fI=CHANNELS\f1
 Capture or play back audio with the specified number of channels. If more than two channels are used it is recommended to use the \fB--channel-map\f1 option below. Defaults to 2.
@@ -81,7 +84,7 @@ Never remap channels. Instead of mapping channels by their name this will match 
 Explicitly configure the latency, with a time specified in bytes in the selected sample format. If left out the server will pick the latency, usually relatively high for power saving reasons. Use either this option or \fB--latency-msec\f1, but not both.
 .TP
 \fB--latency-msec\f1\fI=MSEC\f1
-Explicitly configure the latency, with a time specified in miliseconds. If left out the server will pick the latency, usually relatively high for power saving reasons. Use either this option or \fB--latency\f1, but not both.
+Explicitly configure the latency, with a time specified in milliseconds. If left out the server will pick the latency, usually relatively high for power saving reasons. Use either this option or \fB--latency\f1, but not both.
 .TP
 \fB--process-time\f1\fI=BYTES\f1
 Explicitly configure the process time, with a time specified in bytes in the selected sample format. If left out the server will pick the process time. Use either this option or \fB--process-time-msec\f1, but not both.

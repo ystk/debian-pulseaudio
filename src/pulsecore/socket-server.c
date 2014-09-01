@@ -133,9 +133,9 @@ static void callback(pa_mainloop_api *mainloop, pa_io_event *e, int fd, pa_io_ev
 
     /* There should be a check for socket type here */
     if (s->type == SOCKET_SERVER_IPV4)
-        pa_make_tcp_socket_low_delay(fd);
+        pa_make_tcp_socket_low_delay(nfd);
     else
-        pa_make_socket_low_delay(fd);
+        pa_make_socket_low_delay(nfd);
 
     pa_assert_se(io = pa_iochannel_new(s->mainloop, nfd, nfd));
     s->on_connection(s, io, s->userdata);
@@ -229,7 +229,7 @@ pa_socket_server* pa_socket_server_new_unix(pa_mainloop_api *m, const char *file
 
 #endif /* HAVE_SYS_UN_H */
 
-pa_socket_server* pa_socket_server_new_ipv4(pa_mainloop_api *m, uint32_t address, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv4(pa_mainloop_api *m, uint32_t address, uint16_t port, bool fallback, const char *tcpwrap_service) {
     pa_socket_server *ss;
     int fd = -1;
     struct sockaddr_in sa;
@@ -291,7 +291,7 @@ fail:
 }
 
 #ifdef HAVE_IPV6
-pa_socket_server* pa_socket_server_new_ipv6(pa_mainloop_api *m, const uint8_t address[16], uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv6(pa_mainloop_api *m, const uint8_t address[16], uint16_t port, bool fallback, const char *tcpwrap_service) {
     pa_socket_server *ss;
     int fd = -1;
     struct sockaddr_in6 sa;
@@ -360,7 +360,7 @@ fail:
 }
 #endif
 
-pa_socket_server* pa_socket_server_new_ipv4_loopback(pa_mainloop_api *m, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv4_loopback(pa_mainloop_api *m, uint16_t port, bool fallback, const char *tcpwrap_service) {
     pa_assert(m);
     pa_assert(port > 0);
 
@@ -368,7 +368,7 @@ pa_socket_server* pa_socket_server_new_ipv4_loopback(pa_mainloop_api *m, uint16_
 }
 
 #ifdef HAVE_IPV6
-pa_socket_server* pa_socket_server_new_ipv6_loopback(pa_mainloop_api *m, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv6_loopback(pa_mainloop_api *m, uint16_t port, bool fallback, const char *tcpwrap_service) {
     pa_assert(m);
     pa_assert(port > 0);
 
@@ -376,7 +376,7 @@ pa_socket_server* pa_socket_server_new_ipv6_loopback(pa_mainloop_api *m, uint16_
 }
 #endif
 
-pa_socket_server* pa_socket_server_new_ipv4_any(pa_mainloop_api *m, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv4_any(pa_mainloop_api *m, uint16_t port, bool fallback, const char *tcpwrap_service) {
     pa_assert(m);
     pa_assert(port > 0);
 
@@ -384,7 +384,7 @@ pa_socket_server* pa_socket_server_new_ipv4_any(pa_mainloop_api *m, uint16_t por
 }
 
 #ifdef HAVE_IPV6
-pa_socket_server* pa_socket_server_new_ipv6_any(pa_mainloop_api *m, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv6_any(pa_mainloop_api *m, uint16_t port, bool fallback, const char *tcpwrap_service) {
     pa_assert(m);
     pa_assert(port > 0);
 
@@ -392,7 +392,7 @@ pa_socket_server* pa_socket_server_new_ipv6_any(pa_mainloop_api *m, uint16_t por
 }
 #endif
 
-pa_socket_server* pa_socket_server_new_ipv4_string(pa_mainloop_api *m, const char *name, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv4_string(pa_mainloop_api *m, const char *name, uint16_t port, bool fallback, const char *tcpwrap_service) {
     struct in_addr ipv4;
 
     pa_assert(m);
@@ -406,7 +406,7 @@ pa_socket_server* pa_socket_server_new_ipv4_string(pa_mainloop_api *m, const cha
 }
 
 #ifdef HAVE_IPV6
-pa_socket_server* pa_socket_server_new_ipv6_string(pa_mainloop_api *m, const char *name, uint16_t port, pa_bool_t fallback, const char *tcpwrap_service) {
+pa_socket_server* pa_socket_server_new_ipv6_string(pa_mainloop_api *m, const char *name, uint16_t port, bool fallback, const char *tcpwrap_service) {
     struct in6_addr ipv6;
 
     pa_assert(m);

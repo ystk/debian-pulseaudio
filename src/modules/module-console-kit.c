@@ -30,11 +30,6 @@
 #include <stdlib.h>
 #include <sys/types.h>
 
-#ifdef HAVE_SYSTEMD
-#include <systemd/sd-login.h>
-#include <systemd/sd-daemon.h>
-#endif
-
 #include <pulse/xmalloc.h>
 
 #include <pulsecore/module.h>
@@ -49,7 +44,7 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("Create a client for each ConsoleKit session of this user");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_LOAD_ONCE(true);
 
 static const char* const valid_modargs[] = {
     NULL
@@ -65,7 +60,7 @@ struct userdata {
     pa_core *core;
     pa_dbus_connection *connection;
     pa_hashmap *sessions;
-    pa_bool_t filter_added;
+    bool filter_added;
 };
 
 static void add_session(struct userdata *u, const char *id) {
@@ -167,11 +162,6 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *message, vo
     pa_assert(u);
 
     dbus_error_init(&error);
-
-    pa_log_debug("dbus: interface=%s, path=%s, member=%s\n",
-                 dbus_message_get_interface(message),
-                 dbus_message_get_path(message),
-                 dbus_message_get_member(message));
 
     if (dbus_message_is_signal(message, "org.freedesktop.ConsoleKit.Seat", "SessionAdded")) {
 
@@ -285,12 +275,10 @@ int pa__init(pa_module*m) {
 
     dbus_error_init(&error);
 
-#ifdef HAVE_SYSTEMD
-    /* If systemd support is enabled and we boot on systemd we
-       shouldn't watch ConsoleKit but systemd's logind service. */
-    if (sd_booted() > 0)
+    /* If systemd's logind service is running, we shouldn't watch ConsoleKit
+     * but login */
+    if (access("/run/systemd/seats/", F_OK) >= 0)
         return 0;
-#endif
 
     if (!(ma = pa_modargs_new(m->argument, valid_modargs))) {
         pa_log("Failed to parse module arguments");
@@ -310,14 +298,14 @@ int pa__init(pa_module*m) {
     u->core = m->core;
     u->module = m;
     u->connection = connection;
-    u->sessions = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    u->sessions = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) free_session);
 
     if (!dbus_connection_add_filter(pa_dbus_connection_get(connection), filter_cb, u, NULL)) {
         pa_log_error("Failed to add filter function");
         goto fail;
     }
 
-    u->filter_added = TRUE;
+    u->filter_added = true;
 
     if (pa_dbus_add_matches(
                 pa_dbus_connection_get(connection), &error,
@@ -344,22 +332,16 @@ fail:
     return -1;
 }
 
-
 void pa__done(pa_module *m) {
     struct userdata *u;
-    struct session *session;
 
     pa_assert(m);
 
     if (!(u = m->userdata))
         return;
 
-    if (u->sessions) {
-        while ((session = pa_hashmap_steal_first(u->sessions)))
-            free_session(session);
-
-        pa_hashmap_free(u->sessions, NULL, NULL);
-    }
+    if (u->sessions)
+        pa_hashmap_free(u->sessions);
 
     if (u->connection) {
         pa_dbus_remove_matches(

@@ -45,6 +45,7 @@
 #include <pulsecore/log.h>
 #include <pulsecore/macro.h>
 #include <pulsecore/sndfile-util.h>
+#include <pulsecore/sample-util.h>
 
 #define TIME_EVENT_USEC 50000
 
@@ -59,6 +60,9 @@ static pa_mainloop_api *mainloop_api = NULL;
 static void *buffer = NULL;
 static size_t buffer_length = 0, buffer_index = 0;
 
+static void *silence_buffer = NULL;
+static size_t silence_buffer_length = 0;
+
 static pa_io_event* stdio_event = NULL;
 
 static pa_proplist *proplist = NULL;
@@ -66,19 +70,19 @@ static char *device = NULL;
 
 static SNDFILE* sndfile = NULL;
 
-static pa_bool_t verbose = FALSE;
+static bool verbose = false;
 static pa_volume_t volume = PA_VOLUME_NORM;
-static pa_bool_t volume_is_set = FALSE;
+static bool volume_is_set = false;
 
 static pa_sample_spec sample_spec = {
     .format = PA_SAMPLE_S16LE,
     .rate = 44100,
     .channels = 2
 };
-static pa_bool_t sample_spec_set = FALSE;
+static bool sample_spec_set = false;
 
 static pa_channel_map channel_map;
-static pa_bool_t channel_map_set = FALSE;
+static bool channel_map_set = false;
 
 static sf_count_t (*readf_function)(SNDFILE *_sndfile, void *ptr, sf_count_t frames) = NULL;
 static sf_count_t (*writef_function)(SNDFILE *_sndfile, const void *ptr, sf_count_t frames) = NULL;
@@ -88,8 +92,10 @@ static pa_stream_flags_t flags = 0;
 static size_t latency = 0, process_time = 0;
 static int32_t latency_msec = 0, process_time_msec = 0;
 
-static pa_bool_t raw = TRUE;
+static bool raw = true;
 static int file_format = -1;
+
+static uint32_t monitor_stream = PA_INVALID_INDEX;
 
 static uint32_t cork_requests = 0;
 
@@ -257,18 +263,18 @@ static void stream_read_callback(pa_stream *s, size_t length, void *userdata) {
                 return;
             }
 
-            pa_assert(data);
             pa_assert(length > 0);
 
-            if (buffer) {
+            /* If there is a hole in the stream, we generate silence, except
+             * if it's a passthrough stream in which case we skip the hole. */
+            if (data || !(flags & PA_STREAM_PASSTHROUGH)) {
                 buffer = pa_xrealloc(buffer, buffer_length + length);
-                memcpy((uint8_t*) buffer + buffer_length, data, length);
+                if (data)
+                    memcpy((uint8_t *) buffer + buffer_length, data, length);
+                else
+                    pa_silence_memory((uint8_t *) buffer + buffer_length, length, &sample_spec);
+
                 buffer_length += length;
-            } else {
-                buffer = pa_xmalloc(length);
-                memcpy(buffer, data, length);
-                buffer_length = length;
-                buffer_index = 0;
             }
 
             pa_stream_drop(s);
@@ -287,17 +293,27 @@ static void stream_read_callback(pa_stream *s, size_t length, void *userdata) {
                 return;
             }
 
-            pa_assert(data);
             pa_assert(length > 0);
+
+            if (!data && (flags & PA_STREAM_PASSTHROUGH)) {
+                pa_stream_drop(s);
+                continue;
+            }
+
+            if (!data && length > silence_buffer_length) {
+                silence_buffer = pa_xrealloc(silence_buffer, length);
+                pa_silence_memory((uint8_t *) silence_buffer + silence_buffer_length, length - silence_buffer_length, &sample_spec);
+                silence_buffer_length = length;
+            }
 
             if (writef_function) {
                 size_t k = pa_frame_size(&sample_spec);
 
-                if ((bytes = writef_function(sndfile, data, (sf_count_t) (length/k))) > 0)
+                if ((bytes = writef_function(sndfile, data ? data : silence_buffer, (sf_count_t) (length/k))) > 0)
                     bytes *= (sf_count_t) k;
 
             } else
-                bytes = sf_write_raw(sndfile, data, (sf_count_t) length);
+                bytes = sf_write_raw(sndfile, data ? data : silence_buffer, (sf_count_t) length);
 
             if (bytes < (sf_count_t) length)
                 quit(1);
@@ -494,12 +510,15 @@ static void context_state_callback(pa_context *c, void *userdata) {
                 }
 
             } else {
+                if (monitor_stream != PA_INVALID_INDEX && (pa_stream_set_monitor_stream(stream, monitor_stream) < 0)) {
+                    pa_log(_("Failed to set monitor stream: %s"), pa_strerror(pa_context_errno(c)));
+                    goto fail;
+                }
                 if (pa_stream_connect_record(stream, device, &buffer_attr, flags) < 0) {
                     pa_log(_("pa_stream_connect_record() failed: %s"), pa_strerror(pa_context_errno(c)));
                     goto fail;
                 }
             }
-
             break;
         }
 
@@ -539,7 +558,7 @@ static void stdin_callback(pa_mainloop_api*a, pa_io_event *e, int fd, pa_io_even
 
     buffer = pa_xmalloc(l);
 
-    if ((r = read(fd, buffer, l)) <= 0) {
+    if ((r = pa_read(fd, buffer, l, userdata)) <= 0) {
         if (r == 0) {
             if (verbose)
                 pa_log(_("Got EOF."));
@@ -578,7 +597,7 @@ static void stdout_callback(pa_mainloop_api*a, pa_io_event *e, int fd, pa_io_eve
 
     pa_assert(buffer_length);
 
-    if ((r = write(fd, (uint8_t*) buffer+buffer_index, buffer_length)) <= 0) {
+    if ((r = pa_write(fd, (uint8_t*) buffer+buffer_index, buffer_length, userdata)) <= 0) {
         pa_log(_("write() failed: %s"), strerror(errno));
         quit(1);
 
@@ -684,7 +703,8 @@ static void help(const char *argv0) {
              "      --raw                             Record/play raw PCM data.\n"
              "      --passthrough                     passthrough data \n"
              "      --file-format[=FFORMAT]           Record/play formatted PCM data.\n"
-             "      --list-file-formats               List available file formats.\n")
+             "      --list-file-formats               List available file formats.\n"
+             "      --monitor-stream=INDEX            Record from the sink input with index INDEX.\n")
            , argv0);
 }
 
@@ -709,7 +729,8 @@ enum {
     ARG_FILE_FORMAT,
     ARG_LIST_FILE_FORMATS,
     ARG_LATENCY_MSEC,
-    ARG_PROCESS_TIME_MSEC
+    ARG_PROCESS_TIME_MSEC,
+    ARG_MONITOR_STREAM,
 };
 
 int main(int argc, char *argv[]) {
@@ -718,6 +739,8 @@ int main(int argc, char *argv[]) {
     char *bn, *server = NULL;
     pa_time_event *time_event = NULL;
     const char *filename = NULL;
+    /* type for pa_read/_write. passed as userdata to the callbacks */
+    unsigned long type = 0;
 
     static const struct option long_options[] = {
         {"record",       0, NULL, 'r'},
@@ -748,6 +771,7 @@ int main(int argc, char *argv[]) {
         {"list-file-formats", 0, NULL, ARG_LIST_FILE_FORMATS},
         {"latency-msec", 1, NULL, ARG_LATENCY_MSEC},
         {"process-time-msec", 1, NULL, ARG_PROCESS_TIME_MSEC},
+        {"monitor-stream", 1, NULL, ARG_MONITOR_STREAM},
         {NULL,           0, NULL, 0}
     };
 
@@ -760,16 +784,16 @@ int main(int argc, char *argv[]) {
 
     if (strstr(bn, "play")) {
         mode = PLAYBACK;
-        raw = FALSE;
+        raw = false;
     } else if (strstr(bn, "record")) {
         mode = RECORD;
-        raw = FALSE;
+        raw = false;
     } else if (strstr(bn, "cat")) {
         mode = PLAYBACK;
-        raw = TRUE;
-    } if (strstr(bn, "rec") || strstr(bn, "mon")) {
+        raw = true;
+    } else if (strstr(bn, "rec") || strstr(bn, "mon")) {
         mode = RECORD;
-        raw = TRUE;
+        raw = true;
     }
 
     proplist = pa_proplist_new();
@@ -847,23 +871,23 @@ int main(int argc, char *argv[]) {
             case ARG_VOLUME: {
                 int v = atoi(optarg);
                 volume = v < 0 ? 0U : (pa_volume_t) v;
-                volume_is_set = TRUE;
+                volume_is_set = true;
                 break;
             }
 
             case ARG_CHANNELS:
                 sample_spec.channels = (uint8_t) atoi(optarg);
-                sample_spec_set = TRUE;
+                sample_spec_set = true;
                 break;
 
             case ARG_SAMPLEFORMAT:
                 sample_spec.format = pa_parse_sample_format(optarg);
-                sample_spec_set = TRUE;
+                sample_spec_set = true;
                 break;
 
             case ARG_SAMPLERATE:
                 sample_spec.rate = (uint32_t) atoi(optarg);
-                sample_spec_set = TRUE;
+                sample_spec_set = true;
                 break;
 
             case ARG_CHANNELMAP:
@@ -872,7 +896,7 @@ int main(int argc, char *argv[]) {
                     goto quit;
                 }
 
-                channel_map_set = TRUE;
+                channel_map_set = true;
                 break;
 
             case ARG_FIX_CHANNELS:
@@ -939,7 +963,7 @@ int main(int argc, char *argv[]) {
             }
 
             case ARG_RAW:
-                raw = TRUE;
+                raw = true;
                 break;
 
             case ARG_PASSTHROUGH:
@@ -954,13 +978,20 @@ int main(int argc, char *argv[]) {
                     }
                 }
 
-                raw = FALSE;
+                raw = false;
                 break;
 
             case ARG_LIST_FILE_FORMATS:
                 pa_sndfile_dump_formats();
                 ret = 0;
                 goto quit;
+
+            case ARG_MONITOR_STREAM:
+                if (pa_atou(optarg, &monitor_stream) < 0) {
+                    pa_log(_("Failed to parse the argument for --monitor-stream"));
+                    goto quit;
+                }
+                break;
 
             default:
                 goto quit;
@@ -1039,7 +1070,7 @@ int main(int argc, char *argv[]) {
                 pa_log(_("Failed to determine sample specification from file."));
                 goto quit;
             }
-            sample_spec_set = TRUE;
+            sample_spec_set = true;
 
             if (!channel_map_set) {
                 /* Allow the user to overwrite the channel map on the command line */
@@ -1047,7 +1078,7 @@ int main(int argc, char *argv[]) {
                     if (sample_spec.channels > 2)
                         pa_log(_("Warning: Failed to determine channel map from file."));
                 } else
-                    channel_map_set = TRUE;
+                    channel_map_set = true;
             }
         }
     }
@@ -1129,10 +1160,14 @@ int main(int argc, char *argv[]) {
     pa_disable_sigpipe();
 
     if (raw) {
+#ifdef OS_IS_WIN32
+        /* need to turn on binary mode for stdio io. Windows, meh */
+        setmode(mode == PLAYBACK ? STDIN_FILENO : STDOUT_FILENO, O_BINARY);
+#endif
         if (!(stdio_event = mainloop_api->io_new(mainloop_api,
                                                  mode == PLAYBACK ? STDIN_FILENO : STDOUT_FILENO,
                                                  mode == PLAYBACK ? PA_IO_EVENT_INPUT : PA_IO_EVENT_OUTPUT,
-                                                 mode == PLAYBACK ? stdin_callback : stdout_callback, NULL))) {
+                                                 mode == PLAYBACK ? stdin_callback : stdout_callback, &type))) {
             pa_log(_("io_new() failed."));
             goto quit;
         }
@@ -1187,6 +1222,7 @@ quit:
         pa_mainloop_free(m);
     }
 
+    pa_xfree(silence_buffer);
     pa_xfree(buffer);
 
     pa_xfree(server);

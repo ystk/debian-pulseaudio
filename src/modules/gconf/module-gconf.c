@@ -45,10 +45,12 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("GConf Adapter");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_LOAD_ONCE(true);
 
 #define MAX_MODULES 10
 #define BUF_MAX 2048
+
+struct userdata;
 
 struct module_item {
     char *name;
@@ -57,6 +59,7 @@ struct module_item {
 };
 
 struct module_info {
+    struct userdata *userdata;
     char *name;
 
     struct module_item items[MAX_MODULES];
@@ -128,56 +131,59 @@ static char *read_string(struct userdata *u) {
     }
 }
 
-static void unload_one_module(struct userdata *u, struct module_info*m, unsigned i) {
-    pa_assert(u);
+static void unload_one_module(struct module_info *m, unsigned i) {
+    struct userdata *u;
+
     pa_assert(m);
     pa_assert(i < m->n_items);
+
+    u = m->userdata;
 
     if (m->items[i].index == PA_INVALID_INDEX)
         return;
 
     pa_log_debug("Unloading module #%i", m->items[i].index);
-    pa_module_unload_by_index(u->core, m->items[i].index, TRUE);
+    pa_module_unload_by_index(u->core, m->items[i].index, true);
     m->items[i].index = PA_INVALID_INDEX;
     pa_xfree(m->items[i].name);
     pa_xfree(m->items[i].args);
     m->items[i].name = m->items[i].args = NULL;
 }
 
-static void unload_all_modules(struct userdata *u, struct module_info*m) {
+static void unload_all_modules(struct module_info *m) {
     unsigned i;
 
-    pa_assert(u);
     pa_assert(m);
 
     for (i = 0; i < m->n_items; i++)
-        unload_one_module(u, m, i);
+        unload_one_module(m, i);
 
     m->n_items = 0;
 }
 
 static void load_module(
-        struct userdata *u,
         struct module_info *m,
         unsigned i,
         const char *name,
         const char *args,
-        pa_bool_t is_new) {
+        bool is_new) {
 
+    struct userdata *u;
     pa_module *mod;
 
-    pa_assert(u);
     pa_assert(m);
     pa_assert(name);
     pa_assert(args);
 
+    u = m->userdata;
+
     if (!is_new) {
         if (m->items[i].index != PA_INVALID_INDEX &&
-            strcmp(m->items[i].name, name) == 0 &&
-            strcmp(m->items[i].args, args) == 0)
+            pa_streq(m->items[i].name, name) &&
+            pa_streq(m->items[i].args, args))
             return;
 
-        unload_one_module(u, m, i);
+        unload_one_module(m, i);
     }
 
     pa_log_debug("Loading module '%s' with args '%s' due to GConf configuration.", name, args);
@@ -194,14 +200,12 @@ static void load_module(
     m->items[i].index = mod->index;
 }
 
-static void module_info_free(void *p, void *userdata) {
+static void module_info_free(void *p) {
     struct module_info *m = p;
-    struct userdata *u = userdata;
 
     pa_assert(m);
-    pa_assert(u);
 
-    unload_all_modules(u, m);
+    unload_all_modules(m);
     pa_xfree(m->name);
     pa_xfree(m);
 }
@@ -211,7 +215,7 @@ static int handle_event(struct userdata *u) {
     int ret = 0;
 
     do {
-        if ((opcode = read_byte(u)) < 0){
+        if ((opcode = read_byte(u)) < 0) {
             if (errno == EINTR || errno == EAGAIN)
                 break;
             goto fail;
@@ -233,6 +237,7 @@ static int handle_event(struct userdata *u) {
 
                 if (!(m = pa_hashmap_get(u->module_infos, name))) {
                     m = pa_xnew(struct module_info, 1);
+                    m->userdata = u;
                     m->name = name;
                     m->n_items = 0;
                     pa_hashmap_put(u->module_infos, m->name, m);
@@ -260,7 +265,7 @@ static int handle_event(struct userdata *u) {
                         goto fail;
                     }
 
-                    load_module(u, m, i, module, args, i >= m->n_items);
+                    load_module(m, i, module, args, i >= m->n_items);
 
                     i++;
 
@@ -270,7 +275,7 @@ static int handle_event(struct userdata *u) {
 
                 /* Unload all removed modules */
                 for (j = i; j < m->n_items; j++)
-                    unload_one_module(u, m, j);
+                    unload_one_module(m, j);
 
                 m->n_items = i;
 
@@ -286,7 +291,7 @@ static int handle_event(struct userdata *u) {
 
                 if ((m = pa_hashmap_get(u->module_infos, name))) {
                     pa_hashmap_remove(u->module_infos, name);
-                    module_info_free(m, u);
+                    module_info_free(m);
                 }
 
                 pa_xfree(name);
@@ -319,7 +324,7 @@ static void io_event_cb(
             u->io_event = NULL;
         }
 
-        pa_module_unload_request(u->module, TRUE);
+        pa_module_unload_request(u->module, true);
     }
 }
 
@@ -331,7 +336,7 @@ int pa__init(pa_module*m) {
     u->core = m->core;
     u->module = m;
     m->userdata = u;
-    u->module_infos = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    u->module_infos = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) module_info_free);
     u->pid = (pid_t) -1;
     u->fd = -1;
     u->fd_type = 0;
@@ -396,7 +401,7 @@ void pa__done(pa_module*m) {
         pa_close(u->fd);
 
     if (u->module_infos)
-        pa_hashmap_free(u->module_infos, module_info_free, u);
+        pa_hashmap_free(u->module_infos);
 
     pa_xfree(u);
 }

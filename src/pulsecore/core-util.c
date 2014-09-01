@@ -117,7 +117,7 @@
 #include "rtkit.h"
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <sys/personality.h>
 #endif
 
@@ -149,6 +149,10 @@
 static pa_strlist *recorded_env = NULL;
 
 #ifdef OS_IS_WIN32
+static fd_set nonblocking_fds;
+#endif
+
+#ifdef OS_IS_WIN32
 
 /* Returns the directory of the current DLL, with '/bin/' removed if it is the last component */
 char *pa_win32_get_toplevel(HANDLE handle) {
@@ -168,7 +172,7 @@ char *pa_win32_get_toplevel(HANDLE handle) {
             *p = '\0';
 
         p = strrchr(toplevel, PA_PATH_SEP_CHAR);
-        if (p && (strcmp(p + 1, "bin") == 0))
+        if (p && pa_streq(p + 1, "bin"))
             *p = '\0';
     }
 
@@ -177,8 +181,59 @@ char *pa_win32_get_toplevel(HANDLE handle) {
 
 #endif
 
+static void set_nonblock(int fd, bool nonblock) {
+
+#ifdef O_NONBLOCK
+    int v, nv;
+    pa_assert(fd >= 0);
+
+    pa_assert_se((v = fcntl(fd, F_GETFL)) >= 0);
+
+    if (nonblock)
+        nv = v | O_NONBLOCK;
+    else
+        nv = v & ~O_NONBLOCK;
+
+    if (v != nv)
+        pa_assert_se(fcntl(fd, F_SETFL, v|O_NONBLOCK) >= 0);
+
+#elif defined(OS_IS_WIN32)
+    u_long arg;
+
+    if (nonblock)
+        arg = 1;
+    else
+        arg = 0;
+
+    if (ioctlsocket(fd, FIONBIO, &arg) < 0) {
+        pa_assert_se(WSAGetLastError() == WSAENOTSOCK);
+        pa_log_warn("Only sockets can be made non-blocking!");
+        return;
+    }
+
+    /* There is no method to query status, so we remember all fds */
+    if (nonblock)
+        FD_SET(fd, &nonblocking_fds);
+    else
+        FD_CLR(fd, &nonblocking_fds);
+#else
+    pa_log_warn("Non-blocking I/O not supported.!");
+#endif
+
+}
+
 /** Make a file descriptor nonblock. Doesn't do any error checking */
 void pa_make_fd_nonblock(int fd) {
+    set_nonblock(fd, true);
+}
+
+/** Make a file descriptor blocking. Doesn't do any error checking */
+void pa_make_fd_block(int fd) {
+    set_nonblock(fd, false);
+}
+
+/** Query if a file descriptor is non-blocking */
+bool pa_is_fd_nonblock(int fd) {
 
 #ifdef O_NONBLOCK
     int v;
@@ -186,17 +241,12 @@ void pa_make_fd_nonblock(int fd) {
 
     pa_assert_se((v = fcntl(fd, F_GETFL)) >= 0);
 
-    if (!(v & O_NONBLOCK))
-        pa_assert_se(fcntl(fd, F_SETFL, v|O_NONBLOCK) >= 0);
+    return !!(v & O_NONBLOCK);
 
 #elif defined(OS_IS_WIN32)
-    u_long arg = 1;
-    if (ioctlsocket(fd, FIONBIO, &arg) < 0) {
-        pa_assert_se(WSAGetLastError() == WSAENOTSOCK);
-        pa_log_warn("Only sockets can be made non-blocking!");
-    }
+    return !!FD_ISSET(fd, &nonblocking_fds);
 #else
-    pa_log_warn("Non-blocking I/O not supported.!");
+    return false;
 #endif
 
 }
@@ -216,13 +266,17 @@ void pa_make_fd_cloexec(int fd) {
 
 }
 
-/** Creates a directory securely */
-int pa_make_secure_dir(const char* dir, mode_t m, uid_t uid, gid_t gid) {
+/** Creates a directory securely. Will create parent directories recursively if
+ * required. This will not update permissions on parent directories if they
+ * already exist, however. */
+int pa_make_secure_dir(const char* dir, mode_t m, uid_t uid, gid_t gid, bool update_perms) {
     struct stat st;
     int r, saved_errno;
+    bool retry = true;
 
     pa_assert(dir);
 
+again:
 #ifdef OS_IS_WIN32
     r = mkdir(dir);
 #else
@@ -233,6 +287,14 @@ int pa_make_secure_dir(const char* dir, mode_t m, uid_t uid, gid_t gid) {
     umask(u);
 }
 #endif
+
+    if (r < 0 && errno == ENOENT && retry) {
+        /* If a parent directory in the path doesn't exist, try to create that
+         * first, then try again. */
+        pa_make_secure_parent_dir(dir, m, uid, gid, false);
+        retry = false;
+        goto again;
+    }
 
     if (r < 0 && errno != EEXIST)
         return -1;
@@ -264,13 +326,20 @@ int pa_make_secure_dir(const char* dir, mode_t m, uid_t uid, gid_t gid) {
         goto fail;
     }
 
+    if (!update_perms) {
+        pa_assert_se(pa_close(fd) >= 0);
+        return 0;
+    }
+
 #ifdef HAVE_FCHOWN
     if (uid == (uid_t) -1)
         uid = getuid();
     if (gid == (gid_t) -1)
         gid = getgid();
-    if (fchown(fd, uid, gid) < 0)
+    if (fchown(fd, uid, gid) < 0) {
+        pa_assert_se(pa_close(fd) >= 0);
         goto fail;
+    }
 #endif
 
 #ifdef HAVE_FCHMOD
@@ -325,14 +394,14 @@ char *pa_parent_dir(const char *fn) {
 }
 
 /* Creates a the parent directory of the specified path securely */
-int pa_make_secure_parent_dir(const char *fn, mode_t m, uid_t uid, gid_t gid) {
+int pa_make_secure_parent_dir(const char *fn, mode_t m, uid_t uid, gid_t gid, bool update_perms) {
     int ret = -1;
     char *dir;
 
     if (!(dir = pa_parent_dir(fn)))
         goto finish;
 
-    if (pa_make_secure_dir(dir, m, uid, gid) < 0)
+    if (pa_make_secure_dir(dir, m, uid, gid, update_perms) < 0)
         goto finish;
 
     ret = 0;
@@ -486,12 +555,14 @@ ssize_t pa_loop_write(int fd, const void*data, size_t size, int *type) {
     return ret;
 }
 
-/** Platform independent read function. Necessary since not all
+/** Platform independent close function. Necessary since not all
  * systems treat all file descriptors equal. */
 int pa_close(int fd) {
 
 #ifdef OS_IS_WIN32
     int ret;
+
+    FD_CLR(fd, &nonblocking_fds);
 
     if ((ret = closesocket(fd)) == 0)
         return 0;
@@ -639,6 +710,10 @@ static int set_scheduler(int rtprio) {
     struct sched_param sp;
 #ifdef HAVE_DBUS
     int r;
+    long long rttime;
+#ifdef RLIMIT_RTTIME
+    struct rlimit rl;
+#endif
     DBusError error;
     DBusConnection *bus;
 
@@ -676,16 +751,36 @@ static int set_scheduler(int rtprio) {
      * https://bugs.freedesktop.org/show_bug.cgi?id=16924 */
     dbus_connection_set_exit_on_disconnect(bus, FALSE);
 
-    r = rtkit_make_realtime(bus, 0, rtprio);
-    dbus_connection_close(bus);
-    dbus_connection_unref(bus);
+    rttime = rtkit_get_rttime_usec_max(bus);
+    if (rttime >= 0) {
+#ifdef RLIMIT_RTTIME
+        r = getrlimit(RLIMIT_RTTIME, &rl);
 
-    if (r >= 0) {
-        pa_log_debug("RealtimeKit worked.");
-        return 0;
+        if (r >= 0 && (long long) rl.rlim_max > rttime) {
+            pa_log_info("Clamping rlimit-rttime to %lld for RealtimeKit\n", rttime);
+            rl.rlim_cur = rl.rlim_max = rttime;
+            r = setrlimit(RLIMIT_RTTIME, &rl);
+
+            if (r < 0)
+                pa_log("setrlimit() failed: %s", pa_cstrerror(errno));
+        }
+#endif
+        r = rtkit_make_realtime(bus, 0, rtprio);
+        dbus_connection_close(bus);
+        dbus_connection_unref(bus);
+
+        if (r >= 0) {
+            pa_log_debug("RealtimeKit worked.");
+            return 0;
+        }
+
+        errno = -r;
+    } else {
+        dbus_connection_close(bus);
+        dbus_connection_unref(bus);
+        errno = -rttime;
     }
 
-    errno = -r;
 #else
     errno = 0;
 #endif
@@ -863,6 +958,7 @@ void pa_reset_priority(void) {
 }
 
 int pa_match(const char *expr, const char *v) {
+#if defined(HAVE_REGEX_H) || defined(HAVE_PCREPOSIX_H)
     int k;
     regex_t re;
     int r;
@@ -885,6 +981,10 @@ int pa_match(const char *expr, const char *v) {
         errno = EINVAL;
 
     return r;
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
 }
 
 /* Try to parse a boolean string value.*/
@@ -892,9 +992,11 @@ int pa_parse_boolean(const char *v) {
     pa_assert(v);
 
     /* First we check language independent */
-    if (!strcmp(v, "1") || v[0] == 'y' || v[0] == 'Y' || v[0] == 't' || v[0] == 'T' || !strcasecmp(v, "on"))
+    if (pa_streq(v, "1") || !strcasecmp(v, "y") || !strcasecmp(v, "t")
+            || !strcasecmp(v, "yes") || !strcasecmp(v, "true") || !strcasecmp(v, "on"))
         return 1;
-    else if (!strcmp(v, "0") || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F' || !strcasecmp(v, "off"))
+    else if (pa_streq(v, "0") || !strcasecmp(v, "n") || !strcasecmp(v, "f")
+                 || !strcasecmp(v, "no") || !strcasecmp(v, "false") || !strcasecmp(v, "off"))
         return 0;
 
 #ifdef HAVE_LANGINFO_H
@@ -917,6 +1019,48 @@ int pa_parse_boolean(const char *v) {
     return -1;
 }
 
+/* Try to parse a volume string to pa_volume_t. The allowed formats are:
+ * db, % and unsigned integer */
+int pa_parse_volume(const char *v, pa_volume_t *volume) {
+    int len, ret = -1;
+    uint32_t i;
+    double d;
+    char str[64];
+
+    pa_assert(v);
+    pa_assert(volume);
+
+    len = strlen(v);
+
+    if (len >= 64)
+        return -1;
+
+    memcpy(str, v, len + 1);
+
+    if (str[len - 1] == '%') {
+        str[len - 1] = '\0';
+        if (pa_atou(str, &i) == 0) {
+            *volume = PA_CLAMP_VOLUME((uint64_t) PA_VOLUME_NORM * i / 100);
+            ret = 0;
+        }
+    } else if (len > 2 && (str[len - 1] == 'b' || str[len - 1] == 'B') &&
+               (str[len - 2] == 'd' || str[len - 2] == 'D')) {
+        str[len - 2] = '\0';
+        if (pa_atod(str, &d) == 0) {
+            *volume = pa_sw_volume_from_dB(d);
+            ret = 0;
+        }
+    } else {
+        if (pa_atou(v, &i) == 0) {
+            *volume= PA_CLAMP_VOLUME(i);
+            ret = 0;
+        }
+
+    }
+
+    return ret;
+}
+
 /* Split the specified string wherever one of the strings in delimiter
  * occurs. Each time it is called returns a newly allocated string
  * with pa_xmalloc(). The variable state points to, should be
@@ -935,6 +1079,29 @@ char *pa_split(const char *c, const char *delimiter, const char**state) {
         (*state)++;
 
     return pa_xstrndup(current, l);
+}
+
+/* Split the specified string wherever one of the strings in delimiter
+ * occurs. Each time it is called returns a pointer to the substring within the
+ * string and the length in 'n'. Note that the resultant string cannot be used
+ * as-is without the length parameter, since it is merely pointing to a point
+ * within the original string. The variable state points to, should be
+ * initialized to NULL before the first call. */
+const char *pa_split_in_place(const char *c, const char *delimiter, int *n, const char**state) {
+    const char *current = *state ? *state : c;
+    size_t l;
+
+    if (!*current)
+        return NULL;
+
+    l = strcspn(current, delimiter);
+    *state = current+l;
+
+    if (**state)
+        (*state)++;
+
+    *n = l;
+    return current;
 }
 
 /* Split a string into words. Otherwise similar to pa_split(). */
@@ -1100,7 +1267,7 @@ static int is_group(gid_t gid, const char *name) {
         goto finish;
     }
 
-    r = strcmp(name, group->gr_name) == 0;
+    r = pa_streq(name, group->gr_name);
 
 finish:
     pa_getgrgid_free(group);
@@ -1396,33 +1563,62 @@ int pa_unlock_lockfile(const char *fn, int fd) {
     return r;
 }
 
-static char *get_pulse_home(void) {
-    char *h;
-    struct stat st;
-    char *ret = NULL;
+static char *get_config_home(char *home) {
+    char *t;
 
-    if (!(h = pa_get_home_dir_malloc())) {
+    t = getenv("XDG_CONFIG_HOME");
+    if (t)
+        return pa_xstrdup(t);
+
+    return pa_sprintf_malloc("%s" PA_PATH_SEP ".config", home);
+}
+
+static int check_ours(const char *p) {
+    struct stat st;
+
+    pa_assert(p);
+
+    if (stat(p, &st) < 0)
+        return -errno;
+
+#ifdef HAVE_GETUID
+    if (st.st_uid != getuid())
+        return -EACCES;
+#endif
+
+    return 0;
+}
+
+static char *get_pulse_home(void) {
+    char *h, *ret, *config_home;
+    int t;
+
+    h = pa_get_home_dir_malloc();
+    if (!h) {
         pa_log_error("Failed to get home directory.");
         return NULL;
     }
 
-    if (stat(h, &st) < 0) {
-        pa_log_error("Failed to stat home directory %s: %s", h, pa_cstrerror(errno));
-        goto finish;
+    t = check_ours(h);
+    if (t < 0 && t != -ENOENT) {
+        pa_log_error("Home directory not accessible: %s", pa_cstrerror(-t));
+        pa_xfree(h);
+        return NULL;
     }
 
-#ifdef HAVE_GETUID
-    if (st.st_uid != getuid()) {
-        pa_log_error("Home directory %s not ours.", h);
-        errno = EACCES;
-        goto finish;
-    }
-#endif
-
+    /* If the old directory exists, use it. */
     ret = pa_sprintf_malloc("%s" PA_PATH_SEP ".pulse", h);
+    if (access(ret, F_OK) >= 0) {
+        free(h);
+        return ret;
+    }
+    free(ret);
 
-finish:
-    pa_xfree(h);
+    /* Otherwise go for the XDG compliant directory. */
+    config_home = get_config_home(h);
+    free(h);
+    ret = pa_sprintf_malloc("%s" PA_PATH_SEP "pulse", config_home);
+    free(config_home);
 
     return ret;
 }
@@ -1440,8 +1636,8 @@ char *pa_get_state_dir(void) {
     /* If PULSE_STATE_PATH and PULSE_RUNTIME_PATH point to the same
      * dir then this will break. */
 
-    if (pa_make_secure_dir(d, 0700U, (uid_t) -1, (gid_t) -1) < 0) {
-        pa_log_error("Failed to create secure directory: %s", pa_cstrerror(errno));
+    if (pa_make_secure_dir(d, 0700U, (uid_t) -1, (gid_t) -1, true) < 0) {
+        pa_log_error("Failed to create secure directory (%s): %s", d, pa_cstrerror(errno));
         pa_xfree(d);
         return NULL;
     }
@@ -1572,31 +1768,50 @@ char *pa_get_runtime_dir(void) {
      * to be kept across reboots and is usually private to the user,
      * except in system mode, where it might be accessible by other
      * users, too. Since we need POSIX locking and UNIX sockets in
-     * this directory, we link it to a random subdir in /tmp, if it
-     * was not explicitly configured. */
+     * this directory, we try XDG_RUNTIME_DIR first, and if that isn't
+     * set create a directory in $HOME and link it to a random subdir
+     * in /tmp, if it was not explicitly configured. */
 
     m = pa_in_system_mode() ? 0755U : 0700U;
 
-    if ((d = getenv("PULSE_RUNTIME_PATH"))) {
+    /* Use the explicitly configured value if it is set */
+    d = getenv("PULSE_RUNTIME_PATH");
+    if (d) {
 
-        if (pa_make_secure_dir(d, m, (uid_t) -1, (gid_t) -1) < 0) {
-            pa_log_error("Failed to create secure directory: %s", pa_cstrerror(errno));
+        if (pa_make_secure_dir(d, m, (uid_t) -1, (gid_t) -1, true) < 0) {
+            pa_log_error("Failed to create secure directory (%s): %s", d, pa_cstrerror(errno));
             goto fail;
         }
 
         return pa_xstrdup(d);
     }
 
-    if (!(d = get_pulse_home()))
+    /* Use the XDG standard for the runtime directory. */
+    d = getenv("XDG_RUNTIME_DIR");
+    if (d) {
+        k = pa_sprintf_malloc("%s" PA_PATH_SEP "pulse", d);
+
+        if (pa_make_secure_dir(k, m, (uid_t) -1, (gid_t) -1, true) < 0) {
+            pa_log_error("Failed to create secure directory (%s): %s", k, pa_cstrerror(errno));
+            goto fail;
+        }
+
+        return k;
+    }
+
+    /* XDG_RUNTIME_DIR wasn't set, use the old legacy fallback */
+    d = get_pulse_home();
+    if (!d)
         goto fail;
 
-    if (pa_make_secure_dir(d, m, (uid_t) -1, (gid_t) -1) < 0) {
-        pa_log_error("Failed to create secure directory: %s", pa_cstrerror(errno));
+    if (pa_make_secure_dir(d, m, (uid_t) -1, (gid_t) -1, true) < 0) {
+        pa_log_error("Failed to create secure directory (%s): %s", d, pa_cstrerror(errno));
         pa_xfree(d);
         goto fail;
     }
 
-    if (!(mid = pa_machine_id())) {
+    mid = pa_machine_id();
+    if (!mid) {
         pa_xfree(d);
         goto fail;
     }
@@ -1608,7 +1823,8 @@ char *pa_get_runtime_dir(void) {
     for (;;) {
         /* OK, first let's check if the "runtime" symlink already exists */
 
-        if (!(p = pa_readlink(k))) {
+        p = pa_readlink(k);
+        if (!p) {
 
             if (errno != ENOENT) {
                 pa_log_error("Failed to stat runtime directory %s: %s", k, pa_cstrerror(errno));
@@ -1629,8 +1845,9 @@ char *pa_get_runtime_dir(void) {
                 goto fail;
             }
 #else
-            /* No symlink possible, so let's just create the runtime directly */
-            if (!mkdir(k))
+            /* No symlink possible, so let's just create the runtime directly
+             * Do not check again if it exists since it cannot be a symlink */
+            if (mkdir(k) < 0 && errno != EEXIST)
                 goto fail;
 #endif
 
@@ -1742,15 +1959,22 @@ FILE *pa_open_config_file(const char *global, const char *local, const char *env
         char *lfn;
         char *h;
 
-        if ((e = getenv("PULSE_CONFIG_PATH")))
+        if ((e = getenv("PULSE_CONFIG_PATH"))) {
             fn = lfn = pa_sprintf_malloc("%s" PA_PATH_SEP "%s", e, local);
-        else if ((h = pa_get_home_dir_malloc())) {
+            f = pa_fopen_cloexec(fn, "r");
+        } else if ((h = pa_get_home_dir_malloc())) {
             fn = lfn = pa_sprintf_malloc("%s" PA_PATH_SEP ".pulse" PA_PATH_SEP "%s", h, local);
+            f = pa_fopen_cloexec(fn, "r");
+            if (!f) {
+                free(lfn);
+                fn = lfn = pa_sprintf_malloc("%s" PA_PATH_SEP ".config/pulse" PA_PATH_SEP "%s", h, local);
+                f = pa_fopen_cloexec(fn, "r");
+            }
             pa_xfree(h);
         } else
             return NULL;
 
-        if ((f = pa_fopen_cloexec(fn, "r"))) {
+        if (f) {
             if (result)
                 *result = pa_xstrdup(fn);
 
@@ -1920,7 +2144,7 @@ size_t pa_parsehex(const char *p, uint8_t *d, size_t dlength) {
 }
 
 /* Returns nonzero when *s starts with *pfx */
-pa_bool_t pa_startswith(const char *s, const char *pfx) {
+bool pa_startswith(const char *s, const char *pfx) {
     size_t l;
 
     pa_assert(s);
@@ -1932,7 +2156,7 @@ pa_bool_t pa_startswith(const char *s, const char *pfx) {
 }
 
 /* Returns nonzero when *s ends with *sfx */
-pa_bool_t pa_endswith(const char *s, const char *sfx) {
+bool pa_endswith(const char *s, const char *sfx) {
     size_t l1, l2;
 
     pa_assert(s);
@@ -1941,10 +2165,10 @@ pa_bool_t pa_endswith(const char *s, const char *sfx) {
     l1 = strlen(s);
     l2 = strlen(sfx);
 
-    return l1 >= l2 && strcmp(s+l1-l2, sfx) == 0;
+    return l1 >= l2 && pa_streq(s + l1 - l2, sfx);
 }
 
-pa_bool_t pa_is_path_absolute(const char *fn) {
+bool pa_is_path_absolute(const char *fn) {
     pa_assert(fn);
 
 #ifndef OS_IS_WIN32
@@ -1971,10 +2195,10 @@ char *pa_make_path_absolute(const char *p) {
     return r;
 }
 
-/* if fn is null return the PulseAudio run time path in s (~/.pulse)
- * if fn is non-null and starts with / return fn
- * otherwise append fn to the run time path and return it */
-static char *get_path(const char *fn, pa_bool_t prependmid, pa_bool_t rt) {
+/* If fn is NULL, return the PulseAudio runtime or state dir (depending on the
+ * rt parameter). If fn is non-NULL and starts with /, return fn. Otherwise,
+ * append fn to the runtime/state dir and return it. */
+static char *get_path(const char *fn, bool prependmid, bool rt) {
     char *rtp;
 
     rtp = rt ? pa_get_runtime_dir() : pa_get_state_dir();
@@ -2021,11 +2245,11 @@ static char *get_path(const char *fn, pa_bool_t prependmid, pa_bool_t rt) {
 }
 
 char *pa_runtime_path(const char *fn) {
-    return get_path(fn, FALSE, TRUE);
+    return get_path(fn, false, true);
 }
 
-char *pa_state_path(const char *fn, pa_bool_t appendmid) {
-    return get_path(fn, appendmid, FALSE);
+char *pa_state_path(const char *fn, bool appendmid) {
+    return get_path(fn, appendmid, false);
 }
 
 /* Convert the string s to a signed integer in *ret_i */
@@ -2374,7 +2598,7 @@ int pa_close_allv(const int except_fds[]) {
         struct dirent *de;
 
         while ((de = readdir(d))) {
-            pa_bool_t found;
+            bool found;
             long l;
             char *e = NULL;
             int i;
@@ -2404,10 +2628,10 @@ int pa_close_allv(const int except_fds[]) {
             if (fd == dirfd(d))
                 continue;
 
-            found = FALSE;
+            found = false;
             for (i = 0; except_fds[i] >= 0; i++)
                 if (except_fds[i] == fd) {
-                    found = TRUE;
+                    found = true;
                     break;
                 }
 
@@ -2436,12 +2660,12 @@ int pa_close_allv(const int except_fds[]) {
 
     for (fd = 3; fd < maxfd; fd++) {
         int i;
-        pa_bool_t found;
+        bool found;
 
-        found = FALSE;
+        found = false;
         for (i = 0; except_fds[i] >= 0; i++)
             if (except_fds[i] == fd) {
-                found = TRUE;
+                found = true;
                 break;
             }
 
@@ -2549,12 +2773,12 @@ int pa_reset_sigsv(const int except[]) {
     int sig;
 
     for (sig = 1; sig < NSIG; sig++) {
-        pa_bool_t reset = TRUE;
+        bool reset = true;
 
         switch (sig) {
             case SIGKILL:
             case SIGSTOP:
-                reset = FALSE;
+                reset = false;
                 break;
 
             default: {
@@ -2562,7 +2786,7 @@ int pa_reset_sigsv(const int except[]) {
 
                 for (i = 0; except[i] > 0; i++) {
                     if (sig == except[i]) {
-                        reset = FALSE;
+                        reset = false;
                         break;
                     }
                 }
@@ -2631,33 +2855,33 @@ void pa_unset_env_recorded(void) {
     }
 }
 
-pa_bool_t pa_in_system_mode(void) {
+bool pa_in_system_mode(void) {
     const char *e;
 
     if (!(e = getenv("PULSE_SYSTEM")))
-        return FALSE;
+        return false;
 
     return !!atoi(e);
 }
 
 /* Checks a whitespace-separated list of words in haystack for needle */
-pa_bool_t pa_str_in_list_spaces(const char *haystack, const char *needle) {
+bool pa_str_in_list_spaces(const char *haystack, const char *needle) {
     char *s;
     const char *state = NULL;
 
     if (!haystack || !needle)
-        return FALSE;
+        return false;
 
     while ((s = pa_split_spaces(haystack, &state))) {
         if (pa_streq(needle, s)) {
             pa_xfree(s);
-            return TRUE;
+            return true;
         }
 
         pa_xfree(s);
     }
 
-    return FALSE;
+    return false;
 }
 
 char *pa_get_user_name_malloc(void) {
@@ -2726,9 +2950,9 @@ char *pa_machine_id(void) {
     /* The returned value is supposed be some kind of ascii identifier
      * that is unique and stable across reboots. */
 
-    /* First we try the D-Bus UUID, which is the best option we have,
-     * since it fits perfectly our needs and is not as volatile as the
-     * hostname which might be set from dhcp. */
+    /* First we try the /etc/machine-id, which is the best option we
+     * have, since it fits perfectly our needs and is not as volatile
+     * as the hostname which might be set from dhcp. */
 
     if ((f = pa_fopen_cloexec(PA_MACHINE_ID, "r")) ||
         (f = pa_fopen_cloexec(PA_MACHINE_ID_FALLBACK, "r"))) {
@@ -2746,10 +2970,10 @@ char *pa_machine_id(void) {
     if ((h = pa_get_host_name_malloc()))
         return h;
 
-#ifndef OS_IS_WIN32
+#if !defined(OS_IS_WIN32) && !defined(__ANDROID__)
     /* If no hostname was set we use the POSIX hostid. It's usually
      * the IPv4 address.  Might not be that stable. */
-    return pa_sprintf_malloc("%08lx", (unsigned long) gethostid);
+    return pa_sprintf_malloc("%08lx", (unsigned long) gethostid());
 #else
     return NULL;
 #endif
@@ -2758,7 +2982,8 @@ char *pa_machine_id(void) {
 char *pa_session_id(void) {
     const char *e;
 
-    if (!(e = getenv("XDG_SESSION_COOKIE")))
+    e = getenv("XDG_SESSION_ID");
+    if (!e)
         return NULL;
 
     return pa_utf8_filter(e);
@@ -2784,7 +3009,7 @@ char *pa_uname_string(void) {
 }
 
 #ifdef HAVE_VALGRIND_MEMCHECK_H
-pa_bool_t pa_in_valgrind(void) {
+bool pa_in_valgrind(void) {
     static int b = 0;
 
     /* To make heisenbugs a bit simpler to find we check for $VALGRIND
@@ -2885,16 +3110,16 @@ char *pa_escape(const char *p, const char *chars) {
 
 char *pa_unescape(char *p) {
     char *s, *d;
-    pa_bool_t escaped = FALSE;
+    bool escaped = false;
 
     for (s = p, d = p; *s; s++) {
         if (!escaped && *s == '\\') {
-            escaped = TRUE;
+            escaped = true;
             continue;
         }
 
         *(d++) = *s;
-        escaped = FALSE;
+        escaped = false;
     }
 
     *d = 0;
@@ -2912,7 +3137,7 @@ char *pa_realpath(const char *path) {
         return NULL;
     }
 
-#if defined(__GLIBC__) || defined(__APPLE__)
+#if defined(__GLIBC__)
     {
         char *r;
 
@@ -3032,28 +3257,26 @@ size_t pa_pipe_buf(int fd) {
 
 void pa_reset_personality(void) {
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
     if (personality(PER_LINUX) < 0)
         pa_log_warn("Uh, personality() failed: %s", pa_cstrerror(errno));
 #endif
 
 }
 
-#if defined(__linux__) && !defined(__OPTIMIZE__)
-
-pa_bool_t pa_run_from_build_tree(void) {
+bool pa_run_from_build_tree(void) {
     char *rp;
-    pa_bool_t b = FALSE;
+    static bool b = false;
 
-    if ((rp = pa_readlink("/proc/self/exe"))) {
-        b = pa_startswith(rp, PA_BUILDDIR);
-        pa_xfree(rp);
-    }
+    PA_ONCE_BEGIN {
+        if ((rp = pa_readlink("/proc/self/exe"))) {
+            b = pa_startswith(rp, PA_BUILDDIR);
+            pa_xfree(rp);
+        }
+    } PA_ONCE_END;
 
     return b;
 }
-
-#endif
 
 const char *pa_get_temp_dir(void) {
     const char *t;
@@ -3227,7 +3450,7 @@ char *pa_read_line_from_file(const char *fn) {
     return pa_xstrdup(ln);
 }
 
-pa_bool_t pa_running_in_vm(void) {
+bool pa_running_in_vm(void) {
 
 #if defined(__i386__) || defined(__x86_64__)
 
@@ -3262,7 +3485,7 @@ pa_bool_t pa_running_in_vm(void) {
                 pa_startswith(s, "Xen")) {
 
                 pa_xfree(s);
-                return TRUE;
+                return true;
             }
 
             pa_xfree(s);
@@ -3291,9 +3514,9 @@ pa_bool_t pa_running_in_vm(void) {
         pa_streq(sig.text, "VMwareVMware") ||
         /* http://msdn.microsoft.com/en-us/library/bb969719.aspx */
         pa_streq(sig.text, "Microsoft Hv"))
-        return TRUE;
+        return true;
 
 #endif
 
-    return FALSE;
+    return false;
 }

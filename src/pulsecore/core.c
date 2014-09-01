@@ -53,7 +53,7 @@ static int core_process_msg(pa_msgobject *o, int code, void *userdata, int64_t o
     switch (code) {
 
         case PA_CORE_MESSAGE_UNLOAD_MODULE:
-            pa_module_unload(c, userdata, TRUE);
+            pa_module_unload(c, userdata, true);
             return 0;
 
         default:
@@ -63,7 +63,7 @@ static int core_process_msg(pa_msgobject *o, int code, void *userdata, int64_t o
 
 static void core_free(pa_object *o);
 
-pa_core* pa_core_new(pa_mainloop_api *m, pa_bool_t shared, size_t shm_size) {
+pa_core* pa_core_new(pa_mainloop_api *m, bool shared, size_t shm_size) {
     pa_core* c;
     pa_mempool *pool;
     int j;
@@ -73,7 +73,7 @@ pa_core* pa_core_new(pa_mainloop_api *m, pa_bool_t shared, size_t shm_size) {
     if (shared) {
         if (!(pool = pa_mempool_new(shared, shm_size))) {
             pa_log_warn("failed to allocate shared memory pool. Falling back to a normal memory pool.");
-            shared = FALSE;
+            shared = false;
         }
     }
 
@@ -132,16 +132,16 @@ pa_core* pa_core_new(pa_mainloop_api *m, pa_bool_t shared, size_t shm_size) {
     c->exit_idle_time = -1;
     c->scache_idle_time = 20;
 
-    c->flat_volumes = TRUE;
-    c->disallow_module_loading = FALSE;
-    c->disallow_exit = FALSE;
-    c->running_as_daemon = FALSE;
-    c->realtime_scheduling = FALSE;
+    c->flat_volumes = true;
+    c->disallow_module_loading = false;
+    c->disallow_exit = false;
+    c->running_as_daemon = false;
+    c->realtime_scheduling = false;
     c->realtime_priority = 5;
-    c->disable_remixing = FALSE;
-    c->disable_lfe_remixing = FALSE;
-    c->deferred_volume = TRUE;
-    c->resample_method = PA_RESAMPLER_SPEEX_FLOAT_BASE + 3;
+    c->disable_remixing = false;
+    c->disable_lfe_remixing = false;
+    c->deferred_volume = true;
+    c->resample_method = PA_RESAMPLER_SPEEX_FLOAT_BASE + 1;
 
     for (j = 0; j < PA_CORE_HOOK_MAX; j++)
         pa_hook_init(&c->hooks[j], c);
@@ -170,34 +170,34 @@ static void core_free(pa_object *o) {
      * we get here */
 
     pa_assert(pa_idxset_isempty(c->scache));
-    pa_idxset_free(c->scache, NULL, NULL);
+    pa_idxset_free(c->scache, NULL);
 
     pa_assert(pa_idxset_isempty(c->modules));
-    pa_idxset_free(c->modules, NULL, NULL);
+    pa_idxset_free(c->modules, NULL);
 
     pa_assert(pa_idxset_isempty(c->clients));
-    pa_idxset_free(c->clients, NULL, NULL);
+    pa_idxset_free(c->clients, NULL);
 
     pa_assert(pa_idxset_isempty(c->cards));
-    pa_idxset_free(c->cards, NULL, NULL);
+    pa_idxset_free(c->cards, NULL);
 
     pa_assert(pa_idxset_isempty(c->sinks));
-    pa_idxset_free(c->sinks, NULL, NULL);
+    pa_idxset_free(c->sinks, NULL);
 
     pa_assert(pa_idxset_isempty(c->sources));
-    pa_idxset_free(c->sources, NULL, NULL);
+    pa_idxset_free(c->sources, NULL);
 
     pa_assert(pa_idxset_isempty(c->source_outputs));
-    pa_idxset_free(c->source_outputs, NULL, NULL);
+    pa_idxset_free(c->source_outputs, NULL);
 
     pa_assert(pa_idxset_isempty(c->sink_inputs));
-    pa_idxset_free(c->sink_inputs, NULL, NULL);
+    pa_idxset_free(c->sink_inputs, NULL);
 
     pa_assert(pa_hashmap_isempty(c->namereg));
-    pa_hashmap_free(c->namereg, NULL, NULL);
+    pa_hashmap_free(c->namereg);
 
     pa_assert(pa_hashmap_isempty(c->shared));
-    pa_hashmap_free(c->shared, NULL, NULL);
+    pa_hashmap_free(c->shared);
 
     pa_subscription_free_all(c);
 
@@ -221,7 +221,7 @@ static void exit_callback(pa_mainloop_api *m, pa_time_event *e, const struct tim
     pa_assert(c->exit_event == e);
 
     pa_log_info("We are idle, quitting...");
-    pa_core_exit(c, TRUE, 0);
+    pa_core_exit(c, true, 0);
 }
 
 void pa_core_check_idle(pa_core *c) {
@@ -239,7 +239,7 @@ void pa_core_check_idle(pa_core *c) {
     }
 }
 
-int pa_core_exit(pa_core *c, pa_bool_t force, int retval) {
+int pa_core_exit(pa_core *c, bool force, int retval) {
     pa_assert(c);
 
     if (c->disallow_exit && !force)
@@ -281,7 +281,7 @@ pa_time_event* pa_core_rttime_new(pa_core *c, pa_usec_t usec, pa_time_event_cb_t
     pa_assert(c);
     pa_assert(c->mainloop);
 
-    return c->mainloop->time_new(c->mainloop, pa_timeval_rtstore(&tv, usec, TRUE), cb, userdata);
+    return c->mainloop->time_new(c->mainloop, pa_timeval_rtstore(&tv, usec, true), cb, userdata);
 }
 
 void pa_core_rttime_restart(pa_core *c, pa_time_event *e, pa_usec_t usec) {
@@ -290,5 +290,5 @@ void pa_core_rttime_restart(pa_core *c, pa_time_event *e, pa_usec_t usec) {
     pa_assert(c);
     pa_assert(c->mainloop);
 
-    c->mainloop->time_restart(e, pa_timeval_rtstore(&tv, usec, TRUE));
+    c->mainloop->time_restart(e, pa_timeval_rtstore(&tv, usec, true));
 }

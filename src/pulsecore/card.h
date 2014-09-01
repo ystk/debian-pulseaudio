@@ -29,11 +29,21 @@ typedef struct pa_card pa_card;
 #include <pulsecore/module.h>
 #include <pulsecore/idxset.h>
 
+/* This enum replaces pa_port_available_t (defined in pulse/def.h) for
+ * internal use, so make sure both enum types stay in sync. */
+typedef enum pa_available {
+    PA_AVAILABLE_UNKNOWN = 0,
+    PA_AVAILABLE_NO = 1,
+    PA_AVAILABLE_YES = 2,
+} pa_available_t;
+
 typedef struct pa_card_profile {
+    pa_card *card;
     char *name;
     char *description;
 
     unsigned priority;
+    pa_available_t available; /* PA_AVAILABLE_UNKNOWN, PA_AVAILABLE_NO or PA_AVAILABLE_YES */
 
     /* We probably want to have different properties later on here */
     unsigned n_sinks;
@@ -65,7 +75,7 @@ struct pa_card {
 
     pa_hashmap *ports;
 
-    pa_bool_t save_profile:1;
+    bool save_profile:1;
 
     void *userdata;
 
@@ -84,13 +94,16 @@ typedef struct pa_card_new_data {
 
     pa_hashmap *ports;
 
-    pa_bool_t namereg_fail:1;
+    bool namereg_fail:1;
 
-    pa_bool_t save_profile:1;
+    bool save_profile:1;
 } pa_card_new_data;
 
 pa_card_profile *pa_card_profile_new(const char *name, const char *description, size_t extra);
 void pa_card_profile_free(pa_card_profile *c);
+
+/* The profile's available status has changed */
+void pa_card_profile_set_available(pa_card_profile *c, pa_available_t available);
 
 pa_card_new_data *pa_card_new_data_init(pa_card_new_data *data);
 void pa_card_new_data_set_name(pa_card_new_data *data, const char *name);
@@ -100,8 +113,10 @@ void pa_card_new_data_done(pa_card_new_data *data);
 pa_card *pa_card_new(pa_core *c, pa_card_new_data *data);
 void pa_card_free(pa_card *c);
 
-int pa_card_set_profile(pa_card *c, const char *name, pa_bool_t save);
+void pa_card_add_profile(pa_card *c, pa_card_profile *profile);
 
-int pa_card_suspend(pa_card *c, pa_bool_t suspend, pa_suspend_cause_t cause);
+int pa_card_set_profile(pa_card *c, pa_card_profile *profile, bool save);
+
+int pa_card_suspend(pa_card *c, bool suspend, pa_suspend_cause_t cause);
 
 #endif

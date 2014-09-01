@@ -44,15 +44,15 @@ struct property {
 #define MAKE_HASHMAP(p) ((pa_hashmap*) (p))
 #define MAKE_PROPLIST(p) ((pa_proplist*) (p))
 
-static pa_bool_t property_name_valid(const char *key) {
+int pa_proplist_key_valid(const char *key) {
 
     if (!pa_ascii_valid(key))
-        return FALSE;
+        return 0;
 
     if (strlen(key) <= 0)
-        return FALSE;
+        return 0;
 
-    return TRUE;
+    return 1;
 }
 
 static void property_free(struct property *prop) {
@@ -64,32 +64,31 @@ static void property_free(struct property *prop) {
 }
 
 pa_proplist* pa_proplist_new(void) {
-    return MAKE_PROPLIST(pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func));
+    return MAKE_PROPLIST(pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) property_free));
 }
 
 void pa_proplist_free(pa_proplist* p) {
     pa_assert(p);
 
-    pa_proplist_clear(p);
-    pa_hashmap_free(MAKE_HASHMAP(p), NULL, NULL);
+    pa_hashmap_free(MAKE_HASHMAP(p));
 }
 
 /** Will accept only valid UTF-8 */
 int pa_proplist_sets(pa_proplist *p, const char *key, const char *value) {
     struct property *prop;
-    pa_bool_t add = FALSE;
+    bool add = false;
 
     pa_assert(p);
     pa_assert(key);
     pa_assert(value);
 
-    if (!property_name_valid(key) || !pa_utf8_valid(value))
+    if (!pa_proplist_key_valid(key) || !pa_utf8_valid(value))
         return -1;
 
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), key))) {
         prop = pa_xnew(struct property, 1);
         prop->key = pa_xstrdup(key);
-        add = TRUE;
+        add = true;
     } else
         pa_xfree(prop->value);
 
@@ -105,7 +104,7 @@ int pa_proplist_sets(pa_proplist *p, const char *key, const char *value) {
 /** Will accept only valid UTF-8 */
 static int proplist_setn(pa_proplist *p, const char *key, size_t key_length, const char *value, size_t value_length) {
     struct property *prop;
-    pa_bool_t add = FALSE;
+    bool add = false;
     char *k, *v;
 
     pa_assert(p);
@@ -115,7 +114,7 @@ static int proplist_setn(pa_proplist *p, const char *key, size_t key_length, con
     k = pa_xstrndup(key, key_length);
     v = pa_xstrndup(value, value_length);
 
-    if (!property_name_valid(k) || !pa_utf8_valid(v)) {
+    if (!pa_proplist_key_valid(k) || !pa_utf8_valid(v)) {
         pa_xfree(k);
         pa_xfree(v);
         return -1;
@@ -124,7 +123,7 @@ static int proplist_setn(pa_proplist *p, const char *key, size_t key_length, con
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), k))) {
         prop = pa_xnew(struct property, 1);
         prop->key = k;
-        add = TRUE;
+        add = true;
     } else {
         pa_xfree(prop->value);
         pa_xfree(k);
@@ -156,7 +155,7 @@ int pa_proplist_setp(pa_proplist *p, const char *pair) {
 
 static int proplist_sethex(pa_proplist *p, const char *key, size_t key_length, const char *value, size_t value_length) {
     struct property *prop;
-    pa_bool_t add = FALSE;
+    bool add = false;
     char *k, *v;
     uint8_t *d;
     size_t dn;
@@ -167,7 +166,7 @@ static int proplist_sethex(pa_proplist *p, const char *key, size_t key_length, c
 
     k = pa_xstrndup(key, key_length);
 
-    if (!property_name_valid(k)) {
+    if (!pa_proplist_key_valid(k)) {
         pa_xfree(k);
         return -1;
     }
@@ -187,7 +186,7 @@ static int proplist_sethex(pa_proplist *p, const char *key, size_t key_length, c
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), k))) {
         prop = pa_xnew(struct property, 1);
         prop->key = k;
-        add = TRUE;
+        add = true;
     } else {
         pa_xfree(prop->value);
         pa_xfree(k);
@@ -206,7 +205,7 @@ static int proplist_sethex(pa_proplist *p, const char *key, size_t key_length, c
 /** Will accept only valid UTF-8 */
 int pa_proplist_setf(pa_proplist *p, const char *key, const char *format, ...) {
     struct property *prop;
-    pa_bool_t add = FALSE;
+    bool add = false;
     va_list ap;
     char *v;
 
@@ -214,7 +213,7 @@ int pa_proplist_setf(pa_proplist *p, const char *key, const char *format, ...) {
     pa_assert(key);
     pa_assert(format);
 
-    if (!property_name_valid(key) || !pa_utf8_valid(format))
+    if (!pa_proplist_key_valid(key) || !pa_utf8_valid(format))
         return -1;
 
     va_start(ap, format);
@@ -227,7 +226,7 @@ int pa_proplist_setf(pa_proplist *p, const char *key, const char *format, ...) {
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), key))) {
         prop = pa_xnew(struct property, 1);
         prop->key = pa_xstrdup(key);
-        add = TRUE;
+        add = true;
     } else
         pa_xfree(prop->value);
 
@@ -246,19 +245,19 @@ fail:
 
 int pa_proplist_set(pa_proplist *p, const char *key, const void *data, size_t nbytes) {
     struct property *prop;
-    pa_bool_t add = FALSE;
+    bool add = false;
 
     pa_assert(p);
     pa_assert(key);
     pa_assert(data || nbytes == 0);
 
-    if (!property_name_valid(key))
+    if (!pa_proplist_key_valid(key))
         return -1;
 
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), key))) {
         prop = pa_xnew(struct property, 1);
         prop->key = pa_xstrdup(key);
-        add = TRUE;
+        add = true;
     } else
         pa_xfree(prop->value);
 
@@ -280,7 +279,7 @@ const char *pa_proplist_gets(pa_proplist *p, const char *key) {
     pa_assert(p);
     pa_assert(key);
 
-    if (!property_name_valid(key))
+    if (!pa_proplist_key_valid(key))
         return NULL;
 
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), key)))
@@ -309,7 +308,7 @@ int pa_proplist_get(pa_proplist *p, const char *key, const void **data, size_t *
     pa_assert(data);
     pa_assert(nbytes);
 
-    if (!property_name_valid(key))
+    if (!pa_proplist_key_valid(key))
         return -1;
 
     if (!(prop = pa_hashmap_get(MAKE_HASHMAP(p), key)))
@@ -349,7 +348,7 @@ int pa_proplist_unset(pa_proplist *p, const char *key) {
     pa_assert(p);
     pa_assert(key);
 
-    if (!property_name_valid(key))
+    if (!pa_proplist_key_valid(key))
         return -1;
 
     if (!(prop = pa_hashmap_remove(MAKE_HASHMAP(p), key)))
@@ -367,7 +366,7 @@ int pa_proplist_unset_many(pa_proplist *p, const char * const keys[]) {
     pa_assert(keys);
 
     for (k = keys; *k; k++)
-        if (!property_name_valid(*k))
+        if (!pa_proplist_key_valid(*k))
             return -1;
 
     for (k = keys; *k; k++)
@@ -643,7 +642,7 @@ int pa_proplist_contains(pa_proplist *p, const char *key) {
     pa_assert(p);
     pa_assert(key);
 
-    if (!property_name_valid(key))
+    if (!pa_proplist_key_valid(key))
         return -1;
 
     if (!(pa_hashmap_get(MAKE_HASHMAP(p), key)))
@@ -653,11 +652,9 @@ int pa_proplist_contains(pa_proplist *p, const char *key) {
 }
 
 void pa_proplist_clear(pa_proplist *p) {
-    struct property *prop;
     pa_assert(p);
 
-    while ((prop = pa_hashmap_steal_first(MAKE_HASHMAP(p))))
-        property_free(prop);
+    pa_hashmap_remove_all(MAKE_HASHMAP(p));
 }
 
 pa_proplist* pa_proplist_copy(const pa_proplist *p) {

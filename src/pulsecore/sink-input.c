@@ -32,7 +32,9 @@
 #include <pulse/util.h>
 #include <pulse/internal.h>
 
-#include <pulsecore/sample-util.h>
+#include <pulsecore/core-format.h>
+#include <pulsecore/mix.h>
+#include <pulsecore/stream-util.h>
 #include <pulsecore/core-subscribe.h>
 #include <pulsecore/log.h>
 #include <pulsecore/play-memblockq.h>
@@ -48,10 +50,45 @@
 
 PA_DEFINE_PUBLIC_CLASS(pa_sink_input, pa_msgobject);
 
+struct volume_factor_entry {
+    char *key;
+    pa_cvolume volume;
+};
+
+static struct volume_factor_entry *volume_factor_entry_new(const char *key, const pa_cvolume *volume) {
+    struct volume_factor_entry *entry;
+
+    pa_assert(key);
+    pa_assert(volume);
+
+    entry = pa_xnew(struct volume_factor_entry, 1);
+    entry->key = pa_xstrdup(key);
+
+    entry->volume = *volume;
+
+    return entry;
+}
+
+static void volume_factor_entry_free(struct volume_factor_entry *volume_entry) {
+    pa_assert(volume_entry);
+
+    pa_xfree(volume_entry->key);
+    pa_xfree(volume_entry);
+}
+
+static void volume_factor_from_hashmap(pa_cvolume *v, pa_hashmap *items, uint8_t channels) {
+    struct volume_factor_entry *entry;
+    void *state = NULL;
+
+    pa_cvolume_reset(v, channels);
+    PA_HASHMAP_FOREACH(entry, items, state)
+        pa_sw_cvolume_multiply(v, v, &entry->volume);
+}
+
 static void sink_input_free(pa_object *o);
 static void set_real_ratio(pa_sink_input *i, const pa_cvolume *v);
 
-static int check_passthrough_connection(pa_bool_t passthrough, pa_sink *dest) {
+static int check_passthrough_connection(bool passthrough, pa_sink *dest) {
     if (pa_sink_is_passthrough(dest)) {
         pa_log_warn("Sink is already connected to PASSTHROUGH input");
         return -PA_ERR_BUSY;
@@ -72,7 +109,12 @@ pa_sink_input_new_data* pa_sink_input_new_data_init(pa_sink_input_new_data *data
     pa_zero(*data);
     data->resample_method = PA_RESAMPLER_INVALID;
     data->proplist = pa_proplist_new();
-    data->volume_writable = TRUE;
+    data->volume_writable = true;
+
+    data->volume_factor_items = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL,
+                                                    (pa_free_cb_t) volume_factor_entry_free);
+    data->volume_factor_sink_items = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL,
+                                                         (pa_free_cb_t) volume_factor_entry_free);
 
     return data;
 }
@@ -91,16 +133,16 @@ void pa_sink_input_new_data_set_channel_map(pa_sink_input_new_data *data, const 
         data->channel_map = *map;
 }
 
-pa_bool_t pa_sink_input_new_data_is_passthrough(pa_sink_input_new_data *data) {
+bool pa_sink_input_new_data_is_passthrough(pa_sink_input_new_data *data) {
     pa_assert(data);
 
     if (PA_LIKELY(data->format) && PA_UNLIKELY(!pa_format_info_is_pcm(data->format)))
-        return TRUE;
+        return true;
 
     if (PA_UNLIKELY(data->flags & PA_SINK_INPUT_PASSTHROUGH))
-        return TRUE;
+        return true;
 
-    return FALSE;
+    return false;
 }
 
 void pa_sink_input_new_data_set_volume(pa_sink_input_new_data *data, const pa_cvolume *volume) {
@@ -111,39 +153,37 @@ void pa_sink_input_new_data_set_volume(pa_sink_input_new_data *data, const pa_cv
         data->volume = *volume;
 }
 
-void pa_sink_input_new_data_apply_volume_factor(pa_sink_input_new_data *data, const pa_cvolume *volume_factor) {
+void pa_sink_input_new_data_add_volume_factor(pa_sink_input_new_data *data, const char *key, const pa_cvolume *volume_factor) {
+    struct volume_factor_entry *v;
+
     pa_assert(data);
+    pa_assert(key);
     pa_assert(volume_factor);
 
-    if (data->volume_factor_is_set)
-        pa_sw_cvolume_multiply(&data->volume_factor, &data->volume_factor, volume_factor);
-    else {
-        data->volume_factor_is_set = TRUE;
-        data->volume_factor = *volume_factor;
-    }
+    v = volume_factor_entry_new(key, volume_factor);
+    pa_assert_se(pa_hashmap_put(data->volume_factor_items, v->key, v) >= 0);
 }
 
-void pa_sink_input_new_data_apply_volume_factor_sink(pa_sink_input_new_data *data, const pa_cvolume *volume_factor) {
+void pa_sink_input_new_data_add_volume_factor_sink(pa_sink_input_new_data *data, const char *key, const pa_cvolume *volume_factor) {
+    struct volume_factor_entry *v;
+
     pa_assert(data);
+    pa_assert(key);
     pa_assert(volume_factor);
 
-    if (data->volume_factor_sink_is_set)
-        pa_sw_cvolume_multiply(&data->volume_factor_sink, &data->volume_factor_sink, volume_factor);
-    else {
-        data->volume_factor_sink_is_set = TRUE;
-        data->volume_factor_sink = *volume_factor;
-    }
+    v = volume_factor_entry_new(key, volume_factor);
+    pa_assert_se(pa_hashmap_put(data->volume_factor_sink_items, v->key, v) >= 0);
 }
 
-void pa_sink_input_new_data_set_muted(pa_sink_input_new_data *data, pa_bool_t mute) {
+void pa_sink_input_new_data_set_muted(pa_sink_input_new_data *data, bool mute) {
     pa_assert(data);
 
-    data->muted_is_set = TRUE;
+    data->muted_is_set = true;
     data->muted = !!mute;
 }
 
-pa_bool_t pa_sink_input_new_data_set_sink(pa_sink_input_new_data *data, pa_sink *s, pa_bool_t save) {
-    pa_bool_t ret = TRUE;
+bool pa_sink_input_new_data_set_sink(pa_sink_input_new_data *data, pa_sink *s, bool save) {
+    bool ret = true;
     pa_idxset *formats = NULL;
 
     pa_assert(data);
@@ -162,25 +202,25 @@ pa_bool_t pa_sink_input_new_data_set_sink(pa_sink_input_new_data *data, pa_sink 
             data->sink = s;
             data->save_sink = save;
             if (data->nego_formats)
-                pa_idxset_free(data->nego_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+                pa_idxset_free(data->nego_formats, (pa_free_cb_t) pa_format_info_free);
             data->nego_formats = formats;
         } else {
             /* Sink doesn't support any of the formats requested by the client */
             if (formats)
-                pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
-            ret = FALSE;
+                pa_idxset_free(formats, (pa_free_cb_t) pa_format_info_free);
+            ret = false;
         }
     }
 
     return ret;
 }
 
-pa_bool_t pa_sink_input_new_data_set_formats(pa_sink_input_new_data *data, pa_idxset *formats) {
+bool pa_sink_input_new_data_set_formats(pa_sink_input_new_data *data, pa_idxset *formats) {
     pa_assert(data);
     pa_assert(formats);
 
     if (data->req_formats)
-        pa_idxset_free(formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->req_formats, (pa_free_cb_t) pa_format_info_free);
 
     data->req_formats = formats;
 
@@ -189,20 +229,26 @@ pa_bool_t pa_sink_input_new_data_set_formats(pa_sink_input_new_data *data, pa_id
         return pa_sink_input_new_data_set_sink(data, data->sink, data->save_sink);
     }
 
-    return TRUE;
+    return true;
 }
 
 void pa_sink_input_new_data_done(pa_sink_input_new_data *data) {
     pa_assert(data);
 
     if (data->req_formats)
-        pa_idxset_free(data->req_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->req_formats, (pa_free_cb_t) pa_format_info_free);
 
     if (data->nego_formats)
-        pa_idxset_free(data->nego_formats, (pa_free2_cb_t) pa_format_info_free2, NULL);
+        pa_idxset_free(data->nego_formats, (pa_free_cb_t) pa_format_info_free);
 
     if (data->format)
         pa_format_info_free(data->format);
+
+    if (data->volume_factor_items)
+        pa_hashmap_free(data->volume_factor_items);
+
+    if (data->volume_factor_sink_items)
+        pa_hashmap_free(data->volume_factor_sink_items);
 
     pa_proplist_free(data->proplist);
 }
@@ -212,6 +258,7 @@ static void reset_callbacks(pa_sink_input *i) {
     pa_assert(i);
 
     i->pop = NULL;
+    i->process_underrun = NULL;
     i->process_rewind = NULL;
     i->update_max_rewind = NULL;
     i->update_max_request = NULL;
@@ -240,13 +287,11 @@ int pa_sink_input_new(
 
     pa_sink_input *i;
     pa_resampler *resampler = NULL;
-    char st[PA_SAMPLE_SPEC_SNPRINT_MAX], cm[PA_CHANNEL_MAP_SNPRINT_MAX];
-    pa_channel_map original_cm;
+    char st[PA_SAMPLE_SPEC_SNPRINT_MAX], cm[PA_CHANNEL_MAP_SNPRINT_MAX], fmt[PA_FORMAT_INFO_SNPRINT_MAX];
+    pa_channel_map volume_map;
     int r;
     char *pt;
     char *memblockq_name;
-    pa_sample_spec ss;
-    pa_channel_map map;
 
     pa_assert(_i);
     pa_assert(core);
@@ -257,17 +302,25 @@ int pa_sink_input_new(
         pa_proplist_update(data->proplist, PA_UPDATE_MERGE, data->client->proplist);
 
     if (data->origin_sink && (data->origin_sink->flags & PA_SINK_SHARE_VOLUME_WITH_MASTER))
-        data->volume_writable = FALSE;
+        data->volume_writable = false;
 
     if (!data->req_formats) {
         /* From this point on, we want to work only with formats, and get back
          * to using the sample spec and channel map after all decisions w.r.t.
          * routing are complete. */
-        pa_idxset *tmp = pa_idxset_new(NULL, NULL);
-        pa_format_info *f = pa_format_info_from_sample_spec(&data->sample_spec,
-                data->channel_map_is_set ? &data->channel_map : NULL);
-        pa_idxset_put(tmp, f, NULL);
-        pa_sink_input_new_data_set_formats(data, tmp);
+        pa_format_info *f;
+        pa_idxset *formats;
+
+        f = pa_format_info_from_sample_spec2(&data->sample_spec, data->channel_map_is_set ? &data->channel_map : NULL,
+                                             !(data->flags & PA_SINK_INPUT_FIX_FORMAT),
+                                             !(data->flags & PA_SINK_INPUT_FIX_RATE),
+                                             !(data->flags & PA_SINK_INPUT_FIX_CHANNELS));
+        if (!f)
+            return -PA_ERR_INVALID;
+
+        formats = pa_idxset_new(NULL, NULL);
+        pa_idxset_put(formats, f, NULL);
+        pa_sink_input_new_data_set_formats(data, formats);
     }
 
     if ((r = pa_hook_fire(&core->hooks[PA_CORE_HOOK_SINK_INPUT_NEW], data)) < 0)
@@ -278,91 +331,80 @@ int pa_sink_input_new(
     if (!data->sink) {
         pa_sink *sink = pa_namereg_get(core, NULL, PA_NAMEREG_SINK);
         pa_return_val_if_fail(sink, -PA_ERR_NOENTITY);
-        pa_sink_input_new_data_set_sink(data, sink, FALSE);
+        pa_sink_input_new_data_set_sink(data, sink, false);
     }
-    /* Routing's done, we have a sink. Now let's fix the format and set up the
-     * sample spec */
 
     /* If something didn't pick a format for us, pick the top-most format since
      * we assume this is sorted in priority order */
     if (!data->format && data->nego_formats && !pa_idxset_isempty(data->nego_formats))
         data->format = pa_format_info_copy(pa_idxset_first(data->nego_formats, NULL));
 
-    pa_return_val_if_fail(data->format, -PA_ERR_NOTSUPPORTED);
+    if (PA_LIKELY(data->format)) {
+        pa_log_debug("Negotiated format: %s", pa_format_info_snprint(fmt, sizeof(fmt), data->format));
+    } else {
+        pa_format_info *format;
+        uint32_t idx;
 
-    /* Now populate the sample spec and format according to the final
-     * format that we've negotiated */
-    pa_return_val_if_fail(pa_format_info_to_sample_spec(data->format, &ss, &map) == 0, -PA_ERR_INVALID);
-    pa_sink_input_new_data_set_sample_spec(data, &ss);
-    if (pa_format_info_is_pcm(data->format) && pa_channel_map_valid(&map))
-        pa_sink_input_new_data_set_channel_map(data, &map);
+        pa_log_info("Sink does not support any requested format:");
+        PA_IDXSET_FOREACH(format, data->req_formats, idx)
+            pa_log_info(" -- %s", pa_format_info_snprint(fmt, sizeof(fmt), format));
+
+        return -PA_ERR_NOTSUPPORTED;
+    }
 
     pa_return_val_if_fail(PA_SINK_IS_LINKED(pa_sink_get_state(data->sink)), -PA_ERR_BADSTATE);
-    pa_return_val_if_fail(!data->sync_base || (data->sync_base->sink == data->sink && pa_sink_input_get_state(data->sync_base) == PA_SINK_INPUT_CORKED), -PA_ERR_INVALID);
+    pa_return_val_if_fail(!data->sync_base || (data->sync_base->sink == data->sink
+                                               && pa_sink_input_get_state(data->sync_base) == PA_SINK_INPUT_CORKED),
+                          -PA_ERR_INVALID);
+
+    /* Routing is done. We have a sink and a format. */
+
+    if (data->volume_is_set && pa_format_info_is_pcm(data->format)) {
+        /* If volume is set, we need to save the original data->channel_map,
+         * so that we can remap the volume from the original channel map to the
+         * final channel map of the stream in case data->channel_map gets
+         * modified in pa_format_info_to_sample_spec2(). */
+        r = pa_stream_get_volume_channel_map(&data->volume, data->channel_map_is_set ? &data->channel_map : NULL, data->format, &volume_map);
+        if (r < 0)
+            return r;
+    }
+
+    /* Now populate the sample spec and channel map according to the final
+     * format that we've negotiated */
+    r = pa_format_info_to_sample_spec2(data->format, &data->sample_spec, &data->channel_map, &data->sink->sample_spec,
+                                       &data->sink->channel_map);
+    if (r < 0)
+        return r;
 
     r = check_passthrough_connection(pa_sink_input_new_data_is_passthrough(data), data->sink);
     if (r != PA_OK)
         return r;
 
-    if (!data->sample_spec_is_set)
-        data->sample_spec = data->sink->sample_spec;
-
-    pa_return_val_if_fail(pa_sample_spec_valid(&data->sample_spec), -PA_ERR_INVALID);
-
-    if (!data->channel_map_is_set) {
-        if (pa_channel_map_compatible(&data->sink->channel_map, &data->sample_spec))
-            data->channel_map = data->sink->channel_map;
-        else
-            pa_channel_map_init_extend(&data->channel_map, data->sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
-    }
-
-    pa_return_val_if_fail(pa_channel_map_compatible(&data->channel_map, &data->sample_spec), -PA_ERR_INVALID);
-
     /* Don't restore (or save) stream volume for passthrough streams and
      * prevent attenuation/gain */
     if (pa_sink_input_new_data_is_passthrough(data)) {
-        data->volume_is_set = TRUE;
+        data->volume_is_set = true;
         pa_cvolume_reset(&data->volume, data->sample_spec.channels);
-        data->volume_is_absolute = TRUE;
-        data->save_volume = FALSE;
+        data->volume_is_absolute = true;
+        data->save_volume = false;
     }
 
     if (!data->volume_is_set) {
         pa_cvolume_reset(&data->volume, data->sample_spec.channels);
-        data->volume_is_absolute = FALSE;
-        data->save_volume = FALSE;
+        data->volume_is_absolute = false;
+        data->save_volume = false;
     }
 
-    pa_return_val_if_fail(pa_cvolume_compatible(&data->volume, &data->sample_spec), -PA_ERR_INVALID);
+    if (!data->volume_writable)
+        data->save_volume = false;
 
-    if (!data->volume_factor_is_set)
-        pa_cvolume_reset(&data->volume_factor, data->sample_spec.channels);
-
-    pa_return_val_if_fail(pa_cvolume_compatible(&data->volume_factor, &data->sample_spec), -PA_ERR_INVALID);
-
-    if (!data->volume_factor_sink_is_set)
-        pa_cvolume_reset(&data->volume_factor_sink, data->sink->sample_spec.channels);
-
-    pa_return_val_if_fail(pa_cvolume_compatible(&data->volume_factor_sink, &data->sink->sample_spec), -PA_ERR_INVALID);
+    if (data->volume_is_set)
+        /* The original volume channel map may be different than the final
+         * stream channel map, so remapping may be needed. */
+        pa_cvolume_remap(&data->volume, &volume_map, &data->channel_map);
 
     if (!data->muted_is_set)
-        data->muted = FALSE;
-
-    if (data->flags & PA_SINK_INPUT_FIX_FORMAT)
-        data->sample_spec.format = data->sink->sample_spec.format;
-
-    if (data->flags & PA_SINK_INPUT_FIX_RATE)
-        data->sample_spec.rate = data->sink->sample_spec.rate;
-
-    original_cm = data->channel_map;
-
-    if (data->flags & PA_SINK_INPUT_FIX_CHANNELS) {
-        data->sample_spec.channels = data->sink->sample_spec.channels;
-        data->channel_map = data->sink->channel_map;
-    }
-
-    pa_assert(pa_sample_spec_valid(&data->sample_spec));
-    pa_assert(pa_channel_map_valid(&data->channel_map));
+        data->muted = false;
 
     if (!(data->flags & PA_SINK_INPUT_VARIABLE_RATE) &&
         !pa_sample_spec_equal(&data->sample_spec, &data->sink->sample_spec)) {
@@ -370,15 +412,17 @@ int pa_sink_input_new(
            module-suspend-on-idle can resume a sink */
 
         pa_log_info("Trying to change sample rate");
-        if (pa_sink_update_rate(data->sink, data->sample_spec.rate, pa_sink_input_new_data_is_passthrough(data)) == TRUE)
-            pa_log_info("Rate changed to %u Hz",
-                        data->sink->sample_spec.rate);
-        else
-            pa_log_info("Resampling enabled to %u Hz", data->sink->sample_spec.rate);
+        if (pa_sink_update_rate(data->sink, data->sample_spec.rate, pa_sink_input_new_data_is_passthrough(data)) >= 0)
+            pa_log_info("Rate changed to %u Hz", data->sink->sample_spec.rate);
     }
 
-    /* Due to the fixing of the sample spec the volume might not match anymore */
-    pa_cvolume_remap(&data->volume, &original_cm, &data->channel_map);
+    if (pa_sink_input_new_data_is_passthrough(data) &&
+        !pa_sample_spec_equal(&data->sample_spec, &data->sink->sample_spec)) {
+        /* rate update failed, or other parts of sample spec didn't match */
+
+        pa_log_debug("Could not update sink sample spec to match passthrough stream");
+        return -PA_ERR_NOTSUPPORTED;
+    }
 
     if (data->resample_method == PA_RESAMPLER_INVALID)
         data->resample_method = core->resample_method;
@@ -450,8 +494,14 @@ int pa_sink_input_new(
     } else
         i->volume = data->volume;
 
-    i->volume_factor = data->volume_factor;
-    i->volume_factor_sink = data->volume_factor_sink;
+    i->volume_factor_items = data->volume_factor_items;
+    data->volume_factor_items = NULL;
+    volume_factor_from_hashmap(&i->volume_factor, i->volume_factor_items, i->sample_spec.channels);
+
+    i->volume_factor_sink_items = data->volume_factor_sink_items;
+    data->volume_factor_sink_items = NULL;
+    volume_factor_from_hashmap(&i->volume_factor_sink, i->volume_factor_sink_items, i->sink->sample_spec.channels);
+
     i->real_ratio = i->reference_ratio = data->volume;
     pa_cvolume_reset(&i->soft_volume, i->sample_spec.channels);
     pa_cvolume_reset(&i->real_ratio, i->sample_spec.channels);
@@ -478,7 +528,7 @@ int pa_sink_input_new(
     i->userdata = NULL;
 
     i->thread_info.state = i->state;
-    i->thread_info.attached = FALSE;
+    i->thread_info.attached = false;
     pa_atomic_store(&i->thread_info.drained, 1);
     i->thread_info.sample_spec = i->sample_spec;
     i->thread_info.resampler = resampler;
@@ -486,9 +536,10 @@ int pa_sink_input_new(
     i->thread_info.muted = i->muted;
     i->thread_info.requested_sink_latency = (pa_usec_t) -1;
     i->thread_info.rewrite_nbytes = 0;
-    i->thread_info.rewrite_flush = FALSE;
-    i->thread_info.dont_rewind_render = FALSE;
+    i->thread_info.rewrite_flush = false;
+    i->thread_info.dont_rewind_render = false;
     i->thread_info.underrun_for = (uint64_t) -1;
+    i->thread_info.underrun_for_sink = 0;
     i->thread_info.playing_for = 0;
     i->thread_info.direct_outputs = pa_hashmap_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
@@ -553,7 +604,8 @@ static void sink_input_set_state(pa_sink_input *i, pa_sink_input_state_t state) 
     if (i->state == state)
         return;
 
-    if (i->state == PA_SINK_INPUT_CORKED && state == PA_SINK_INPUT_RUNNING && pa_sink_used_by(i->sink) == 0) {
+    if (i->state == PA_SINK_INPUT_CORKED && state == PA_SINK_INPUT_RUNNING && pa_sink_used_by(i->sink) == 0 &&
+        !pa_sample_spec_equal(&i->sample_spec, &i->sink->sample_spec)) {
         /* We were uncorked and the sink was not playing anything -- let's try
          * to update the sample rate to avoid resampling */
         pa_sink_update_rate(i->sink, i->sample_spec.rate, pa_sink_input_is_passthrough(i));
@@ -591,7 +643,7 @@ static void sink_input_set_state(pa_sink_input *i, pa_sink_input_state_t state) 
 
 /* Called from main context */
 void pa_sink_input_unlink(pa_sink_input *i) {
-    pa_bool_t linked;
+    bool linked;
     pa_source_output *o, *p = NULL;
 
     pa_assert(i);
@@ -638,7 +690,7 @@ void pa_sink_input_unlink(pa_sink_input *i) {
 
         /* We might need to update the sink's volume if we are in flat volume mode. */
         if (pa_sink_flat_volume_enabled(i->sink))
-            pa_sink_set_volume(i->sink, NULL, FALSE, FALSE);
+            pa_sink_set_volume(i->sink, NULL, false, false);
 
         if (i->sink->asyncmsgq)
             pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i->sink), PA_SINK_MESSAGE_REMOVE_INPUT, i, 0, NULL) == 0);
@@ -674,7 +726,8 @@ static void sink_input_free(pa_object *o) {
     if (PA_SINK_INPUT_IS_LINKED(i->state))
         pa_sink_input_unlink(i);
 
-    pa_log_info("Freeing input %u \"%s\"", i->index, pa_strnull(pa_proplist_gets(i->proplist, PA_PROP_MEDIA_NAME)));
+    pa_log_info("Freeing input %u \"%s\"", i->index,
+                i->proplist ? pa_strnull(pa_proplist_gets(i->proplist, PA_PROP_MEDIA_NAME)) : "");
 
     /* Side note: this function must be able to destruct properly any
      * kind of sink input in any state, even those which are
@@ -694,10 +747,16 @@ static void sink_input_free(pa_object *o) {
         pa_proplist_free(i->proplist);
 
     if (i->direct_outputs)
-        pa_idxset_free(i->direct_outputs, NULL, NULL);
+        pa_idxset_free(i->direct_outputs, NULL);
 
     if (i->thread_info.direct_outputs)
-        pa_hashmap_free(i->thread_info.direct_outputs, NULL, NULL);
+        pa_hashmap_free(i->thread_info.direct_outputs);
+
+    if (i->volume_factor_items)
+        pa_hashmap_free(i->volume_factor_items);
+
+    if (i->volume_factor_sink_items)
+        pa_hashmap_free(i->volume_factor_sink_items);
 
     pa_xfree(i->driver);
     pa_xfree(i);
@@ -724,7 +783,7 @@ void pa_sink_input_put(pa_sink_input *i) {
 
     /* We might need to update the sink's volume if we are in flat volume mode. */
     if (pa_sink_flat_volume_enabled(i->sink))
-        pa_sink_set_volume(i->sink, NULL, FALSE, i->save_volume);
+        pa_sink_set_volume(i->sink, NULL, false, i->save_volume);
     else {
         if (i->origin_sink && (i->origin_sink->flags & PA_SINK_SHARE_VOLUME_WITH_MASTER)) {
             pa_assert(pa_cvolume_is_norm(&i->volume));
@@ -777,11 +836,12 @@ pa_usec_t pa_sink_input_get_latency(pa_sink_input *i, pa_usec_t *sink_latency) {
 }
 
 /* Called from thread context */
-void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, pa_memchunk *chunk, pa_cvolume *volume) {
-    pa_bool_t do_volume_adj_here, need_volume_factor_sink;
-    pa_bool_t volume_is_norm;
+void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink bytes */, pa_memchunk *chunk, pa_cvolume *volume) {
+    bool do_volume_adj_here, need_volume_factor_sink;
+    bool volume_is_norm;
     size_t block_size_max_sink, block_size_max_sink_input;
     size_t ilength;
+    size_t ilength_full;
 
     pa_sink_input_assert_ref(i);
     pa_sink_input_assert_io_context(i);
@@ -815,6 +875,10 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
     } else
         ilength = slength;
 
+    /* Length corresponding to slength (without limiting to
+     * block_size_max_sink_input). */
+    ilength_full = ilength;
+
     if (ilength > block_size_max_sink_input)
         ilength = block_size_max_sink_input;
 
@@ -839,10 +903,12 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
              * data, so let's just hand out silence */
             pa_atomic_store(&i->thread_info.drained, 1);
 
-            pa_memblockq_seek(i->thread_info.render_memblockq, (int64_t) slength, PA_SEEK_RELATIVE, TRUE);
+            pa_memblockq_seek(i->thread_info.render_memblockq, (int64_t) slength, PA_SEEK_RELATIVE, true);
             i->thread_info.playing_for = 0;
-            if (i->thread_info.underrun_for != (uint64_t) -1)
-                i->thread_info.underrun_for += ilength;
+            if (i->thread_info.underrun_for != (uint64_t) -1) {
+                i->thread_info.underrun_for += ilength_full;
+                i->thread_info.underrun_for_sink += slength;
+            }
             break;
         }
 
@@ -852,11 +918,12 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
         pa_assert(tchunk.memblock);
 
         i->thread_info.underrun_for = 0;
+        i->thread_info.underrun_for_sink = 0;
         i->thread_info.playing_for += tchunk.length;
 
         while (tchunk.length > 0) {
             pa_memchunk wchunk;
-            pa_bool_t nvfs = need_volume_factor_sink;
+            bool nvfs = need_volume_factor_sink;
 
             wchunk = tchunk;
             pa_memblock_ref(wchunk.memblock);
@@ -870,7 +937,7 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
 
                 if (i->thread_info.muted) {
                     pa_silence_memchunk(&wchunk, &i->thread_info.sample_spec);
-                    nvfs = FALSE;
+                    nvfs = false;
 
                 } else if (!i->thread_info.resampler && nvfs) {
                     pa_cvolume v;
@@ -880,7 +947,7 @@ void pa_sink_input_peek(pa_sink_input *i, size_t slength /* in sink frames */, p
 
                     pa_sw_cvolume_multiply(&v, &i->thread_info.soft_volume, &i->volume_factor_sink);
                     pa_volume_memchunk(&wchunk, &i->thread_info.sample_spec, &v);
-                    nvfs = FALSE;
+                    nvfs = false;
 
                 } else
                     pa_volume_memchunk(&wchunk, &i->thread_info.sample_spec, &i->thread_info.soft_volume);
@@ -965,9 +1032,25 @@ void pa_sink_input_drop(pa_sink_input *i, size_t nbytes /* in sink sample spec *
 }
 
 /* Called from thread context */
+bool pa_sink_input_process_underrun(pa_sink_input *i) {
+    pa_sink_input_assert_ref(i);
+    pa_sink_input_assert_io_context(i);
+
+    if (pa_memblockq_is_readable(i->thread_info.render_memblockq))
+        return false;
+
+    if (i->process_underrun && i->process_underrun(i)) {
+        /* All valid data has been played back, so we can empty this queue. */
+        pa_memblockq_silence(i->thread_info.render_memblockq);
+        return true;
+    }
+    return false;
+}
+
+/* Called from thread context */
 void pa_sink_input_process_rewind(pa_sink_input *i, size_t nbytes /* in sink sample spec */) {
     size_t lbq;
-    pa_bool_t called = FALSE;
+    bool called = false;
 
     pa_sink_input_assert_ref(i);
     pa_sink_input_assert_io_context(i);
@@ -988,9 +1071,9 @@ void pa_sink_input_process_rewind(pa_sink_input *i, size_t nbytes /* in sink sam
     if (i->thread_info.rewrite_nbytes == (size_t) -1) {
 
         /* We were asked to drop all buffered data, and rerequest new
-         * data from implementor the next time push() is called */
+         * data from implementor the next time peek() is called */
 
-        pa_memblockq_flush_write(i->thread_info.render_memblockq, TRUE);
+        pa_memblockq_flush_write(i->thread_info.render_memblockq, true);
 
     } else if (i->thread_info.rewrite_nbytes > 0) {
         size_t max_rewrite, amount;
@@ -1011,7 +1094,7 @@ void pa_sink_input_process_rewind(pa_sink_input *i, size_t nbytes /* in sink sam
             /* Tell the implementor */
             if (i->process_rewind)
                 i->process_rewind(i, amount);
-            called = TRUE;
+            called = true;
 
             /* Convert back to to sink domain */
             if (i->thread_info.resampler)
@@ -1019,7 +1102,7 @@ void pa_sink_input_process_rewind(pa_sink_input *i, size_t nbytes /* in sink sam
 
             if (amount > 0)
                 /* Ok, now update the write pointer */
-                pa_memblockq_seek(i->thread_info.render_memblockq, - ((int64_t) amount), PA_SEEK_RELATIVE, TRUE);
+                pa_memblockq_seek(i->thread_info.render_memblockq, - ((int64_t) amount), PA_SEEK_RELATIVE, true);
 
             if (i->thread_info.rewrite_flush)
                 pa_memblockq_silence(i->thread_info.render_memblockq);
@@ -1035,8 +1118,8 @@ void pa_sink_input_process_rewind(pa_sink_input *i, size_t nbytes /* in sink sam
             i->process_rewind(i, 0);
 
     i->thread_info.rewrite_nbytes = 0;
-    i->thread_info.rewrite_flush = FALSE;
-    i->thread_info.dont_rewind_render = FALSE;
+    i->thread_info.rewrite_flush = false;
+    i->thread_info.dont_rewind_render = false;
 }
 
 /* Called from thread context */
@@ -1094,7 +1177,7 @@ pa_usec_t pa_sink_input_set_requested_latency_within_thread(pa_sink_input *i, pa
         usec = PA_CLAMP(usec, i->sink->thread_info.min_latency, i->sink->thread_info.max_latency);
 
     i->thread_info.requested_sink_latency = usec;
-    pa_sink_invalidate_requested_latency(i->sink, TRUE);
+    pa_sink_invalidate_requested_latency(i->sink, true);
 
     return usec;
 }
@@ -1146,7 +1229,7 @@ pa_usec_t pa_sink_input_get_requested_latency(pa_sink_input *i) {
 }
 
 /* Called from main context */
-void pa_sink_input_set_volume(pa_sink_input *i, const pa_cvolume *volume, pa_bool_t save, pa_bool_t absolute) {
+void pa_sink_input_set_volume(pa_sink_input *i, const pa_cvolume *volume, bool save, bool absolute) {
     pa_cvolume v;
 
     pa_sink_input_assert_ref(i);
@@ -1184,12 +1267,13 @@ void pa_sink_input_set_volume(pa_sink_input *i, const pa_cvolume *volume, pa_boo
         /* We are in flat volume mode, so let's update all sink input
          * volumes and update the flat volume of the sink */
 
-        pa_sink_set_volume(i->sink, NULL, TRUE, save);
+        pa_sink_set_volume(i->sink, NULL, true, save);
 
     } else {
         /* OK, we are in normal volume mode. The volume only affects
          * ourselves */
         set_real_ratio(i, volume);
+        i->reference_ratio = i->volume;
 
         /* Copy the new soft_volume to the thread_info struct */
         pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i), PA_SINK_INPUT_MESSAGE_SET_SOFT_VOLUME, NULL, 0, NULL) == 0);
@@ -1201,6 +1285,70 @@ void pa_sink_input_set_volume(pa_sink_input *i, const pa_cvolume *volume, pa_boo
 
     /* The virtual volume changed, let's tell people so */
     pa_subscription_post(i->core, PA_SUBSCRIPTION_EVENT_SINK_INPUT|PA_SUBSCRIPTION_EVENT_CHANGE, i->index);
+}
+
+void pa_sink_input_add_volume_factor(pa_sink_input *i, const char *key, const pa_cvolume *volume_factor) {
+    struct volume_factor_entry *v;
+
+    pa_sink_input_assert_ref(i);
+    pa_assert_ctl_context();
+    pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
+    pa_assert(volume_factor);
+    pa_assert(key);
+    pa_assert(pa_cvolume_valid(volume_factor));
+    pa_assert(volume_factor->channels == 1 || pa_cvolume_compatible(volume_factor, &i->sample_spec));
+
+    v = volume_factor_entry_new(key, volume_factor);
+    if (!pa_cvolume_compatible(volume_factor, &i->sample_spec))
+        pa_cvolume_set(&v->volume, i->sample_spec.channels, volume_factor->values[0]);
+
+    pa_assert_se(pa_hashmap_put(i->volume_factor_items, v->key, v) >= 0);
+    if (pa_hashmap_size(i->volume_factor_items) == 1)
+        i->volume_factor = v->volume;
+    else
+        pa_sw_cvolume_multiply(&i->volume_factor, &i->volume_factor, &v->volume);
+
+    pa_sw_cvolume_multiply(&i->soft_volume, &i->real_ratio, &i->volume_factor);
+
+    /* Copy the new soft_volume to the thread_info struct */
+    pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i), PA_SINK_INPUT_MESSAGE_SET_SOFT_VOLUME, NULL, 0, NULL) == 0);
+}
+
+/* Returns 0 if an entry was removed and -1 if no entry for the given key was
+ * found. */
+int pa_sink_input_remove_volume_factor(pa_sink_input *i, const char *key) {
+    struct volume_factor_entry *v;
+
+    pa_sink_input_assert_ref(i);
+    pa_assert(key);
+    pa_assert_ctl_context();
+    pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
+
+    v = pa_hashmap_remove(i->volume_factor_items, key);
+
+    if (!v)
+        return -1;
+
+    volume_factor_entry_free(v);
+
+    switch (pa_hashmap_size(i->volume_factor_items)) {
+        case 0:
+            pa_cvolume_reset(&i->volume_factor, i->sample_spec.channels);
+            break;
+        case 1:
+            v = pa_hashmap_first(i->volume_factor_items);
+            i->volume_factor = v->volume;
+            break;
+        default:
+            volume_factor_from_hashmap(&i->volume_factor, i->volume_factor_items, i->volume_factor.channels);
+    }
+
+    pa_sw_cvolume_multiply(&i->soft_volume, &i->real_ratio, &i->volume_factor);
+
+    /* Copy the new soft_volume to the thread_info struct */
+    pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i), PA_SINK_INPUT_MESSAGE_SET_SOFT_VOLUME, NULL, 0, NULL) == 0);
+
+    return 0;
 }
 
 /* Called from main context */
@@ -1225,20 +1373,20 @@ static void set_real_ratio(pa_sink_input *i, const pa_cvolume *v) {
 }
 
 /* Called from main or I/O context */
-pa_bool_t pa_sink_input_is_passthrough(pa_sink_input *i) {
+bool pa_sink_input_is_passthrough(pa_sink_input *i) {
     pa_sink_input_assert_ref(i);
 
     if (PA_UNLIKELY(!pa_format_info_is_pcm(i->format)))
-        return TRUE;
+        return true;
 
     if (PA_UNLIKELY(i->flags & PA_SINK_INPUT_PASSTHROUGH))
-        return TRUE;
+        return true;
 
-    return FALSE;
+    return false;
 }
 
 /* Called from main context */
-pa_bool_t pa_sink_input_is_volume_readable(pa_sink_input *i) {
+bool pa_sink_input_is_volume_readable(pa_sink_input *i) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
 
@@ -1246,7 +1394,7 @@ pa_bool_t pa_sink_input_is_volume_readable(pa_sink_input *i) {
 }
 
 /* Called from main context */
-pa_cvolume *pa_sink_input_get_volume(pa_sink_input *i, pa_cvolume *volume, pa_bool_t absolute) {
+pa_cvolume *pa_sink_input_get_volume(pa_sink_input *i, pa_cvolume *volume, bool absolute) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
@@ -1261,7 +1409,7 @@ pa_cvolume *pa_sink_input_get_volume(pa_sink_input *i, pa_cvolume *volume, pa_bo
 }
 
 /* Called from main context */
-void pa_sink_input_set_mute(pa_sink_input *i, pa_bool_t mute, pa_bool_t save) {
+void pa_sink_input_set_mute(pa_sink_input *i, bool mute, bool save) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
@@ -1284,7 +1432,7 @@ void pa_sink_input_set_mute(pa_sink_input *i, pa_bool_t mute, pa_bool_t save) {
 }
 
 /* Called from main context */
-pa_bool_t pa_sink_input_get_mute(pa_sink_input *i) {
+bool pa_sink_input_get_mute(pa_sink_input *i) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
@@ -1307,7 +1455,7 @@ void pa_sink_input_update_proplist(pa_sink_input *i, pa_update_mode_t mode, pa_p
 }
 
 /* Called from main context */
-void pa_sink_input_cork(pa_sink_input *i, pa_bool_t b) {
+void pa_sink_input_cork(pa_sink_input *i, bool b) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
@@ -1367,70 +1515,72 @@ pa_resample_method_t pa_sink_input_get_resample_method(pa_sink_input *i) {
 }
 
 /* Called from main context */
-pa_bool_t pa_sink_input_may_move(pa_sink_input *i) {
+bool pa_sink_input_may_move(pa_sink_input *i) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
 
     if (i->flags & PA_SINK_INPUT_DONT_MOVE)
-        return FALSE;
+        return false;
 
     if (i->sync_next || i->sync_prev) {
         pa_log_warn("Moving synchronized streams not supported.");
-        return FALSE;
+        return false;
     }
 
-    return TRUE;
+    return true;
 }
 
-static pa_bool_t find_filter_sink_input(pa_sink_input *target, pa_sink *s) {
+static bool find_filter_sink_input(pa_sink_input *target, pa_sink *s) {
     int i = 0;
     while (s && s->input_to_master) {
         if (s->input_to_master == target)
-            return TRUE;
+            return true;
         s = s->input_to_master->sink;
         pa_assert(i++ < 100);
     }
-    return FALSE;
+    return false;
 }
 
 /* Called from main context */
-pa_bool_t pa_sink_input_may_move_to(pa_sink_input *i, pa_sink *dest) {
+bool pa_sink_input_may_move_to(pa_sink_input *i, pa_sink *dest) {
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
     pa_sink_assert_ref(dest);
 
     if (dest == i->sink)
-        return TRUE;
+        return true;
 
     if (!pa_sink_input_may_move(i))
-        return FALSE;
+        return false;
 
     /* Make sure we're not creating a filter sink cycle */
     if (find_filter_sink_input(i, dest)) {
         pa_log_debug("Can't connect input to %s, as that would create a cycle.", dest->name);
-        return FALSE;
+        return false;
     }
 
     if (pa_idxset_size(dest->inputs) >= PA_MAX_INPUTS_PER_SINK) {
         pa_log_warn("Failed to move sink input: too many inputs per sink.");
-        return FALSE;
+        return false;
     }
 
     if (check_passthrough_connection(pa_sink_input_is_passthrough(i), dest) < 0)
-        return FALSE;
+        return false;
 
     if (i->may_move_to)
         if (!i->may_move_to(i, dest))
-            return FALSE;
+            return false;
 
-    return TRUE;
+    return true;
 }
 
 /* Called from main context */
 int pa_sink_input_start_move(pa_sink_input *i) {
     pa_source_output *o, *p = NULL;
+    struct volume_factor_entry *v;
+    void *state = NULL;
     int r;
 
     pa_sink_input_assert_ref(i);
@@ -1463,12 +1613,17 @@ int pa_sink_input_start_move(pa_sink_input *i) {
     if (pa_sink_flat_volume_enabled(i->sink))
         /* We might need to update the sink's volume if we are in flat
          * volume mode. */
-        pa_sink_set_volume(i->sink, NULL, FALSE, FALSE);
+        pa_sink_set_volume(i->sink, NULL, false, false);
 
     pa_assert_se(pa_asyncmsgq_send(i->sink->asyncmsgq, PA_MSGOBJECT(i->sink), PA_SINK_MESSAGE_START_MOVE, i, 0, NULL) == 0);
 
     pa_sink_update_status(i->sink);
+
+    PA_HASHMAP_FOREACH(v, i->volume_factor_sink_items, state)
+        pa_cvolume_remap(&v->volume, &i->sink->channel_map, &i->channel_map);
+
     pa_cvolume_remap(&i->volume_factor_sink, &i->sink->channel_map, &i->channel_map);
+
     i->sink = NULL;
 
     pa_sink_input_unref(i);
@@ -1623,11 +1778,14 @@ static void update_volume_due_to_moving(pa_sink_input *i, pa_sink *dest) {
     /* If i->sink == dest, then recursion has finished, and we can finally call
      * pa_sink_set_volume(), which will do the rest of the updates. */
     if ((i->sink == dest) && pa_sink_flat_volume_enabled(i->sink))
-        pa_sink_set_volume(i->sink, NULL, FALSE, i->save_volume);
+        pa_sink_set_volume(i->sink, NULL, false, i->save_volume);
 }
 
 /* Called from main context */
-int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
+int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, bool save) {
+    struct volume_factor_entry *v;
+    void *state = NULL;
+
     pa_sink_input_assert_ref(i);
     pa_assert_ctl_context();
     pa_assert(PA_SINK_INPUT_IS_LINKED(i->state));
@@ -1655,12 +1813,8 @@ int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
            SINK_INPUT_MOVE_FINISH hook */
 
         pa_log_info("Trying to change sample rate");
-        if (pa_sink_update_rate(dest, i->sample_spec.rate, pa_sink_input_is_passthrough(i)) == TRUE)
-            pa_log_info("Rate changed to %u Hz",
-                        dest->sample_spec.rate);
-        else
-            pa_log_info("Resampling enabled to %u Hz",
-                        dest->sample_spec.rate);
+        if (pa_sink_update_rate(dest, i->sample_spec.rate, pa_sink_input_is_passthrough(i)) >= 0)
+            pa_log_info("Rate changed to %u Hz", dest->sample_spec.rate);
     }
 
     if (i->moving)
@@ -1669,6 +1823,9 @@ int pa_sink_input_finish_move(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
     i->sink = dest;
     i->save_sink = save;
     pa_idxset_put(dest->inputs, pa_sink_input_ref(i), NULL);
+
+    PA_HASHMAP_FOREACH(v, i->volume_factor_sink_items, state)
+        pa_cvolume_remap(&v->volume, &i->channel_map, &i->sink->channel_map);
 
     pa_cvolume_remap(&i->volume_factor_sink, &i->channel_map, &i->sink->channel_map);
 
@@ -1714,7 +1871,7 @@ void pa_sink_input_fail_move(pa_sink_input *i) {
 }
 
 /* Called from main context */
-int pa_sink_input_move_to(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
+int pa_sink_input_move_to(pa_sink_input *i, pa_sink *dest, bool save) {
     int r;
 
     pa_sink_input_assert_ref(i);
@@ -1749,7 +1906,7 @@ int pa_sink_input_move_to(pa_sink_input *i, pa_sink *dest, pa_bool_t save) {
 
 /* Called from IO thread context */
 void pa_sink_input_set_state_within_thread(pa_sink_input *i, pa_sink_input_state_t state) {
-    pa_bool_t corking, uncorking;
+    bool corking, uncorking;
 
     pa_sink_input_assert_ref(i);
     pa_sink_input_assert_io_context(i);
@@ -1773,7 +1930,7 @@ void pa_sink_input_set_state_within_thread(pa_sink_input *i, pa_sink_input_state
 
         /* This will tell the implementing sink input driver to rewind
          * so that the unplayed already mixed data is not lost */
-        pa_sink_input_request_rewind(i, 0, TRUE, TRUE, FALSE);
+        pa_sink_input_request_rewind(i, 0, true, true, false);
 
         /* Set the corked state *after* requesting rewind */
         i->thread_info.state = state;
@@ -1783,6 +1940,7 @@ void pa_sink_input_set_state_within_thread(pa_sink_input *i, pa_sink_input_state
         pa_log_debug("Requesting rewind due to uncorking");
 
         i->thread_info.underrun_for = (uint64_t) -1;
+        i->thread_info.underrun_for_sink = 0;
         i->thread_info.playing_for = 0;
 
         /* Set the uncorked state *before* requesting rewind */
@@ -1790,7 +1948,7 @@ void pa_sink_input_set_state_within_thread(pa_sink_input *i, pa_sink_input_state
 
         /* OK, we're being uncorked. Make sure we're not rewound when
          * the hw buffer is remixed and request a remix. */
-        pa_sink_input_request_rewind(i, 0, FALSE, TRUE, TRUE);
+        pa_sink_input_request_rewind(i, 0, false, true, true);
     } else
         /* We may not be corking or uncorking, but we still need to set the state. */
         i->thread_info.state = state;
@@ -1806,14 +1964,14 @@ int pa_sink_input_process_msg(pa_msgobject *o, int code, void *userdata, int64_t
         case PA_SINK_INPUT_MESSAGE_SET_SOFT_VOLUME:
             if (!pa_cvolume_equal(&i->thread_info.soft_volume, &i->soft_volume)) {
                 i->thread_info.soft_volume = i->soft_volume;
-                pa_sink_input_request_rewind(i, 0, TRUE, FALSE, FALSE);
+                pa_sink_input_request_rewind(i, 0, true, false, false);
             }
             return 0;
 
         case PA_SINK_INPUT_MESSAGE_SET_SOFT_MUTE:
             if (i->thread_info.muted != i->muted) {
                 i->thread_info.muted = i->muted;
-                pa_sink_input_request_rewind(i, 0, TRUE, FALSE, FALSE);
+                pa_sink_input_request_rewind(i, 0, true, false, false);
             }
             return 0;
 
@@ -1877,36 +2035,36 @@ pa_sink_input_state_t pa_sink_input_get_state(pa_sink_input *i) {
 }
 
 /* Called from IO context */
-pa_bool_t pa_sink_input_safe_to_remove(pa_sink_input *i) {
+bool pa_sink_input_safe_to_remove(pa_sink_input *i) {
     pa_sink_input_assert_ref(i);
     pa_sink_input_assert_io_context(i);
 
     if (PA_SINK_INPUT_IS_LINKED(i->thread_info.state))
         return pa_memblockq_is_empty(i->thread_info.render_memblockq);
 
-    return TRUE;
+    return true;
 }
 
 /* Called from IO context */
 void pa_sink_input_request_rewind(
         pa_sink_input *i,
         size_t nbytes  /* in our sample spec */,
-        pa_bool_t rewrite,
-        pa_bool_t flush,
-        pa_bool_t dont_rewind_render) {
+        bool rewrite,
+        bool flush,
+        bool dont_rewind_render) {
 
     size_t lbq;
 
-    /* If 'rewrite' is TRUE the sink is rewound as far as requested
+    /* If 'rewrite' is true the sink is rewound as far as requested
      * and possible and the exact value of this is passed back the
-     * implementor via process_rewind(). If 'flush' is also TRUE all
+     * implementor via process_rewind(). If 'flush' is also true all
      * already rendered data is also dropped.
      *
-     * If 'rewrite' is FALSE the sink is rewound as far as requested
+     * If 'rewrite' is false the sink is rewound as far as requested
      * and possible and the already rendered data is dropped so that
      * in the next iteration we read new data from the
-     * implementor. This implies 'flush' is TRUE.  If
-     * dont_rewind_render is TRUE then the render memblockq is not
+     * implementor. This implies 'flush' is true.  If
+     * dont_rewind_render is true then the render memblockq is not
      * rewound. */
 
     /* nbytes = 0 means maximum rewind request */
@@ -1957,13 +2115,13 @@ void pa_sink_input_request_rewind(
     }
 
     i->thread_info.rewrite_flush =
-        i->thread_info.rewrite_flush ||
-        (flush && i->thread_info.rewrite_nbytes != 0);
+        i->thread_info.rewrite_flush || flush;
 
     i->thread_info.dont_rewind_render =
         i->thread_info.dont_rewind_render ||
         dont_rewind_render;
 
+    /* nbytes is -1 if some earlier rewind request had rewrite == false. */
     if (nbytes != (size_t) -1) {
 
         /* Transform to sink domain */
@@ -2052,7 +2210,8 @@ int pa_sink_input_update_rate(pa_sink_input *i) {
                                      i->requested_resample_method,
                                      ((i->flags & PA_SINK_INPUT_VARIABLE_RATE) ? PA_RESAMPLER_VARIABLE_RATE : 0) |
                                      ((i->flags & PA_SINK_INPUT_NO_REMAP) ? PA_RESAMPLER_NO_REMAP : 0) |
-                                     (i->core->disable_remixing || (i->flags & PA_SINK_INPUT_NO_REMIX) ? PA_RESAMPLER_NO_REMIX : 0));
+                                     (i->core->disable_remixing || (i->flags & PA_SINK_INPUT_NO_REMIX) ? PA_RESAMPLER_NO_REMIX : 0) |
+                                     (i->core->disable_lfe_remixing ? PA_RESAMPLER_NO_LFE : 0));
 
         if (!new_resampler) {
             pa_log_warn("Unsupported resampling operation.");

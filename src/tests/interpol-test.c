@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <check.h>
+
 #include <pulse/pulseaudio.h>
 #include <pulse/mainloop.h>
 
@@ -41,8 +43,9 @@
 static pa_context *context = NULL;
 static pa_stream *stream = NULL;
 static pa_mainloop_api *mainloop_api = NULL;
-static pa_bool_t playback = TRUE;
+static bool playback = true;
 static pa_usec_t latency = 0;
+static const char *bname = NULL;
 
 static void stream_write_cb(pa_stream *p, size_t nbytes, void *userdata) {
     /* Just some silence */
@@ -50,14 +53,14 @@ static void stream_write_cb(pa_stream *p, size_t nbytes, void *userdata) {
     for (;;) {
         void *data;
 
-        pa_assert_se((nbytes = pa_stream_writable_size(p)) != (size_t) -1);
+        fail_unless((nbytes = pa_stream_writable_size(p)) != (size_t) -1);
 
         if (nbytes <= 0)
             break;
 
-        pa_assert_se(pa_stream_begin_write(p, &data, &nbytes) == 0);
+        fail_unless(pa_stream_begin_write(p, &data, &nbytes) == 0);
         pa_memzero(data, nbytes);
-        pa_assert_se(pa_stream_write(p, data, nbytes, NULL, 0, PA_SEEK_RELATIVE) == 0);
+        fail_unless(pa_stream_write(p, data, nbytes, NULL, 0, PA_SEEK_RELATIVE) == 0);
     }
 }
 
@@ -72,8 +75,8 @@ static void stream_read_cb(pa_stream *p, size_t nbytes, void *userdata) {
         if (nbytes <= 0)
             break;
 
-        pa_assert_se(pa_stream_peek(p, &data, &nbytes) == 0);
-        pa_assert_se(pa_stream_drop(p) == 0);
+        fail_unless(pa_stream_peek(p, &data, &nbytes) == 0);
+        fail_unless(pa_stream_drop(p) == 0);
     }
 }
 
@@ -88,7 +91,7 @@ static void stream_latency_cb(pa_stream *p, void *userdata) {
 
 /* This is called whenever the context status changes */
 static void context_state_callback(pa_context *c, void *userdata) {
-    pa_assert(c);
+    fail_unless(c != NULL);
 
     switch (pa_context_get_state(c)) {
         case PA_CONTEXT_CONNECTING:
@@ -121,7 +124,8 @@ static void context_state_callback(pa_context *c, void *userdata) {
 
             pa_log("Connection established");
 
-            pa_assert_se(stream = pa_stream_new(c, "interpol-test", &ss, NULL));
+            stream = pa_stream_new(c, "interpol-test", &ss, NULL);
+            fail_unless(stream != NULL);
 
             if (playback) {
                 pa_assert_se(pa_stream_connect_playback(stream, NULL, &attr, flags, NULL, NULL) == 0);
@@ -142,37 +146,34 @@ static void context_state_callback(pa_context *c, void *userdata) {
         case PA_CONTEXT_FAILED:
         default:
             pa_log_error("Context error: %s", pa_strerror(pa_context_errno(c)));
-            abort();
+            fail();
     }
 }
 
-int main(int argc, char *argv[]) {
+START_TEST (interpol_test) {
     pa_threaded_mainloop* m = NULL;
     int k;
     struct timeval start, last_info = { 0, 0 };
     pa_usec_t old_t = 0, old_rtc = 0;
 #ifdef CORK
-    pa_bool_t corked = FALSE;
+    bool corked = false;
 #endif
 
-    if (!getenv("MAKE_CHECK"))
-        pa_log_set_level(PA_LOG_DEBUG);
-
-    playback = argc <= 1 || !pa_streq(argv[1], "-r");
-    latency = (argc >= 2 && !pa_streq(argv[1], "-r")) ? atoi(argv[1]) : (argc >= 3 ? atoi(argv[2]) : 0);
-
     /* Set up a new main loop */
-    pa_assert_se(m = pa_threaded_mainloop_new());
-    pa_assert_se(mainloop_api = pa_threaded_mainloop_get_api(m));
-    pa_assert_se(context = pa_context_new(mainloop_api, argv[0]));
+    m = pa_threaded_mainloop_new();
+    fail_unless(m != NULL);
+    mainloop_api = pa_threaded_mainloop_get_api(m);
+    fail_unless(mainloop_api != NULL);
+    context = pa_context_new(mainloop_api, bname);
+    fail_unless(context != NULL);
 
     pa_context_set_state_callback(context, context_state_callback, NULL);
 
-    pa_assert_se(pa_context_connect(context, NULL, 0, NULL) >= 0);
+    fail_unless(pa_context_connect(context, NULL, 0, NULL) >= 0);
 
     pa_gettimeofday(&start);
 
-    pa_assert_se(pa_threaded_mainloop_start(m) >= 0);
+    fail_unless(pa_threaded_mainloop_start(m) >= 0);
 
 /* #ifdef CORK */
     for (k = 0; k < 20000; k++)
@@ -180,10 +181,10 @@ int main(int argc, char *argv[]) {
 /*     for (k = 0; k < 2000; k++) */
 /* #endif */
     {
-        pa_bool_t success = FALSE, changed = FALSE;
+        bool success = false, changed = false;
         pa_usec_t t, rtc, d;
         struct timeval now, tv;
-        pa_bool_t playing = FALSE;
+        bool playing = false;
 
         pa_threaded_mainloop_lock(m);
 
@@ -192,15 +193,15 @@ int main(int argc, char *argv[]) {
 
             if (pa_stream_get_time(stream, &t) >= 0 &&
                 pa_stream_get_latency(stream, &d, NULL) >= 0)
-                success = TRUE;
+                success = true;
 
             if ((info = pa_stream_get_timing_info(stream))) {
                 if (memcmp(&last_info, &info->timestamp, sizeof(struct timeval))) {
-                    changed = TRUE;
+                    changed = true;
                     last_info = info->timestamp;
                 }
                 if (info->playing)
-                    playing = TRUE;
+                    playing = true;
             }
         }
 
@@ -210,7 +211,7 @@ int main(int argc, char *argv[]) {
 
         if (success) {
 #ifdef CORK
-            pa_bool_t cork_now;
+            bool cork_now;
 #endif
             rtc = pa_timeval_diff(&now, &start);
             pa_log_info("%i\t%llu\t%llu\t%llu\t%llu\t%lli\t%u\t%u\t%llu\t%llu\n", k,
@@ -264,6 +265,32 @@ int main(int argc, char *argv[]) {
 
     if (m)
         pa_threaded_mainloop_free(m);
+}
+END_TEST
 
-    return 0;
+int main(int argc, char *argv[]) {
+    int failed = 0;
+    Suite *s;
+    TCase *tc;
+    SRunner *sr;
+
+    if (!getenv("MAKE_CHECK"))
+        pa_log_set_level(PA_LOG_DEBUG);
+
+    bname = argv[0];
+    playback = argc <= 1 || !pa_streq(argv[1], "-r");
+    latency = (argc >= 2 && !pa_streq(argv[1], "-r")) ? atoi(argv[1]) : (argc >= 3 ? atoi(argv[2]) : 0);
+
+    s = suite_create("Interpol");
+    tc = tcase_create("interpol");
+    tcase_add_test(tc, interpol_test);
+    tcase_set_timeout(tc, 5 * 60);
+    suite_add_tcase(s, tc);
+
+    sr = srunner_create(s);
+    srunner_run_all(sr, CK_NORMAL);
+    failed = srunner_ntests_failed(sr);
+    srunner_free(sr);
+
+    return (failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

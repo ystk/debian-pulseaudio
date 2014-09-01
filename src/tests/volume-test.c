@@ -24,12 +24,14 @@
 #include <stdio.h>
 #include <math.h>
 
+#include <check.h>
+
 #include <pulse/volume.h>
 
 #include <pulsecore/log.h>
 #include <pulsecore/macro.h>
 
-int main(int argc, char *argv[]) {
+START_TEST (volume_test) {
     pa_volume_t v;
     pa_cvolume cv;
     float b;
@@ -52,39 +54,47 @@ int main(int argc, char *argv[]) {
                v, (v*100)/PA_VOLUME_NORM, dB, f, pa_sw_volume_from_dB(dB), pa_sw_volume_from_linear(f));
     }
 
-    for (v = PA_VOLUME_MUTED; v <= PA_VOLUME_NORM*2; v += 256) {
-        char s[PA_CVOLUME_SNPRINT_MAX], t[PA_SW_CVOLUME_SNPRINT_DB_MAX];
-
-        pa_cvolume_set(&cv, 2, v);
-
-        pa_log_debug("Volume: %3i [%s] [%s]", v, pa_cvolume_snprint(s, sizeof(s), &cv), pa_sw_cvolume_snprint_dB(t, sizeof(t), &cv));
-    }
-
     map.channels = cv.channels = 2;
     map.map[0] = PA_CHANNEL_POSITION_LEFT;
     map.map[1] = PA_CHANNEL_POSITION_RIGHT;
 
+    for (v = PA_VOLUME_MUTED; v <= PA_VOLUME_NORM*2; v += 256) {
+        char s[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
+
+        pa_cvolume_set(&cv, 2, v);
+
+        pa_log_debug("Volume: %3i [%s]", v, pa_cvolume_snprint_verbose(s, sizeof(s), &cv, &map, true));
+    }
+
     for (cv.values[0] = PA_VOLUME_MUTED; cv.values[0] <= PA_VOLUME_NORM*2; cv.values[0] += 4096)
         for (cv.values[1] = PA_VOLUME_MUTED; cv.values[1] <= PA_VOLUME_NORM*2; cv.values[1] += 4096) {
-            char s[PA_CVOLUME_SNPRINT_MAX];
+            char s[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
 
-            pa_log_debug("Volume: [%s]; balance: %2.1f", pa_cvolume_snprint(s, sizeof(s), &cv), pa_cvolume_get_balance(&cv, &map));
+            pa_log_debug("Volume: [%s]; balance: %2.1f",
+                         pa_cvolume_snprint_verbose(s, sizeof(s), &cv, &map, true),
+                         pa_cvolume_get_balance(&cv, &map));
         }
 
     for (cv.values[0] = PA_VOLUME_MUTED+4096; cv.values[0] <= PA_VOLUME_NORM*2; cv.values[0] += 4096)
         for (cv.values[1] = PA_VOLUME_MUTED; cv.values[1] <= PA_VOLUME_NORM*2; cv.values[1] += 4096)
             for (b = -1.0f; b <= 1.0f; b += 0.2f) {
-                char s[PA_CVOLUME_SNPRINT_MAX];
+                char s[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
                 pa_cvolume r;
                 float k;
 
-                pa_log_debug("Before: volume: [%s]; balance: %2.1f", pa_cvolume_snprint(s, sizeof(s), &cv), pa_cvolume_get_balance(&cv, &map));
+                pa_log_debug("Before: volume: [%s]; balance: %2.1f",
+                             pa_cvolume_snprint_verbose(s, sizeof(s), &cv, &map, true),
+                             pa_cvolume_get_balance(&cv, &map));
 
                 r = cv;
                 pa_cvolume_set_balance(&r, &map,b);
 
                 k = pa_cvolume_get_balance(&r, &map);
-                pa_log_debug("After: volume: [%s]; balance: %2.1f (intended: %2.1f) %s", pa_cvolume_snprint(s, sizeof(s), &r), k, b, k < b-.05 || k > b+.5 ? "MISMATCH" : "");
+                pa_log_debug("After: volume: [%s]; balance: %2.1f (intended: %2.1f) %s",
+                             pa_cvolume_snprint_verbose(s, sizeof(s), &r, &map, true),
+                             k,
+                             b,
+                             k < b - .05 || k > b + .5 ? "MISMATCH" : "");
             }
 
     for (v = PA_VOLUME_MUTED; v <= PA_VOLUME_NORM*2; v += 51) {
@@ -95,8 +105,8 @@ int main(int argc, char *argv[]) {
         pa_volume_t r = pa_sw_volume_from_dB(db);
         pa_volume_t w;
 
-        pa_assert(k == v);
-        pa_assert(r == v);
+        fail_unless(k == v);
+        fail_unless(r == v);
 
         for (w = PA_VOLUME_MUTED; w < PA_VOLUME_NORM*2; w += 37) {
 
@@ -127,8 +137,33 @@ int main(int argc, char *argv[]) {
 
     pa_log("max deviation: %lu n=%lu", (unsigned long) md, (unsigned long) mdn);
 
-    pa_assert(md <= 1);
-    pa_assert(mdn <= 251);
+    fail_unless(md <= 1);
 
-    return 0;
+    /* mdn counts the times there were rounding errors during the test. The
+     * number of rounding errors seems to vary slightly depending on the
+     * hardware. The original limit was 251 errors, but it was increased to 253
+     * when the test was failing on Tanu's laptop.
+     * See https://bugs.freedesktop.org/show_bug.cgi?id=72374 */
+    fail_unless(mdn <= 253);
+}
+END_TEST
+
+int main(int argc, char *argv[]) {
+    int failed = 0;
+    Suite *s;
+    TCase *tc;
+    SRunner *sr;
+
+    s = suite_create("Volume");
+    tc = tcase_create("volume");
+    tcase_add_test(tc, volume_test);
+    tcase_set_timeout(tc, 120);
+    suite_add_tcase(s, tc);
+
+    sr = srunner_create(s);
+    srunner_run_all(sr, CK_NORMAL);
+    failed = srunner_ntests_failed(sr);
+    srunner_free(sr);
+
+    return (failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -270,7 +270,7 @@ static void help(const char *argv0) {
              "back and forth.\n"
              "\n"
              "Sample type must be one of s16le, s16be, u8, float32le, float32be, ulaw, alaw,\n"
-             "32le, s32be (defaults to s16ne)\n"
+             "s24le, s24be, s24-32le, s24-32be, s32le, s32be (defaults to s16ne)\n"
              "\n"
              "See --dump-resample-methods for possible values of resample methods.\n"),
              argv0);
@@ -302,7 +302,7 @@ int main(int argc, char *argv[]) {
     pa_mempool *pool = NULL;
     pa_sample_spec a, b;
     int ret = 1, c;
-    pa_bool_t all_formats = TRUE;
+    bool all_formats = true;
     pa_resample_method_t method;
     int seconds;
 
@@ -331,7 +331,7 @@ int main(int argc, char *argv[]) {
     if (!getenv("MAKE_CHECK"))
         pa_log_set_level(PA_LOG_INFO);
 
-    pa_assert_se(pool = pa_mempool_new(FALSE, 0));
+    pa_assert_se(pool = pa_mempool_new(false, 0));
 
     a.channels = b.channels = 1;
     a.rate = b.rate = 44100;
@@ -368,7 +368,7 @@ int main(int argc, char *argv[]) {
 
             case ARG_FROM_SAMPLEFORMAT:
                 a.format = pa_parse_sample_format(optarg);
-                all_formats = FALSE;
+                all_formats = false;
                 break;
 
             case ARG_FROM_SAMPLERATE:
@@ -381,7 +381,7 @@ int main(int argc, char *argv[]) {
 
             case ARG_TO_SAMPLEFORMAT:
                 b.format = pa_parse_sample_format(optarg);
-                all_formats = FALSE;
+                all_formats = false;
                 break;
 
             case ARG_TO_SAMPLERATE:
@@ -407,7 +407,7 @@ int main(int argc, char *argv[]) {
     }
 
     ret = 0;
-    pa_assert_se(pool = pa_mempool_new(FALSE, 0));
+    pa_assert_se(pool = pa_mempool_new(false, 0));
 
     if (!all_formats) {
 
@@ -431,7 +431,8 @@ int main(int argc, char *argv[]) {
         i.index = 0;
         while (seconds--) {
             pa_resampler_run(resampler, &i, &j);
-            pa_memblock_unref(j.memblock);
+            if (j.memblock)
+                pa_memblock_unref(j.memblock);
         }
         pa_log_info("resampling: %llu", (long long unsigned)(pa_rtclock_now() - ts));
         pa_memblock_unref(i.memblock);

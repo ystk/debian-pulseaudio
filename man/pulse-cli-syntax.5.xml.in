@@ -24,7 +24,7 @@ USA.
 <manpage name="pulse-cli-syntax" section="5" desc="PulseAudio Command Line Interface Syntax">
 
   <synopsis>
-    <p><file>~/.pulse/default.pa</file></p>
+    <p><file>~/.config/pulse/default.pa</file></p>
     <p><file>@PA_DEFAULT_CONFIG_DIR@/default.pa</file></p>
     <p><file>@PA_DEFAULT_CONFIG_DIR@/system.pa</file></p>
   </synopsis>
@@ -32,16 +32,15 @@ USA.
   <description>
     <p>
       PulseAudio provides a simple command line language used by configuration
-      scripts and the pacmd interactive shell, and the modules module-cli and
+      scripts, the pacmd interactive shell, and the modules module-cli and
       module-cli-protocol-{unix,tcp}. Empty lines and lines beginning with a
       hashmark (#) are silently ignored. Several commands are supported.
     </p>
 
     <p>
-      Note that any boolean arguments can be given positively as '1', 'on' or any
-      word starting with the letters 't' or 'y'. Likewise, negative values can be
-      given as '0', 'off' or any word starting with the letters 'f' or 'n'.
-      Case is ignored.
+      Note that any boolean arguments can be given positively as '1', 't', 'y',
+      'true', 'yes' or 'on'. Likewise, negative values can be given as '0',
+      'f', 'n', 'false', 'no' or 'off'. Case is ignored.
     </p>
   </description>
 
@@ -100,9 +99,9 @@ USA.
     </option>
 
     <option>
-      <p><opt>unload-module</opt> <arg>index</arg></p>
-      <optdesc><p>Unload a module specified by its index in the module list as
-      returned by list-modules.</p></optdesc>
+      <p><opt>unload-module</opt> <arg>index|name</arg></p>
+      <optdesc><p>Unload a module, specified either by its index in the module
+      list or its name.</p></optdesc>
     </option>
 
     <option>
@@ -158,6 +157,11 @@ USA.
     <option>
       <p><opt>set-sink-port|set-source-port</opt> <arg>index|name</arg> <arg>port-name</arg></p>
       <optdesc><p>Change the profile of a sink (resp. source).</p></optdesc>
+    </option>
+
+    <option>
+      <p><opt>set-port-latency-offset</opt> <arg>card-index|card-name</arg> <arg>port-name</arg> <arg>offset</arg> </p>
+      <optdesc><p>Change the latency offset of a port belonging to the specified card</p></optdesc>
     </option>
 
     <option>
@@ -258,6 +262,12 @@ USA.
     </option>
 
     <option>
+      <p><opt>set-log-target</opt> <arg>target</arg></p>
+      <optdesc><p>Change the log target (null, auto, journal, syslog, stderr,
+      file:PATH, newfile:PATH).</p></optdesc>
+    </option>
+
+    <option>
       <p><opt>set-log-time</opt> <arg>boolean</arg></p>
       <optdesc><p>Show timestamps in log messages.</p></optdesc>
     </option>
@@ -298,7 +308,7 @@ USA.
 
   <section name="Meta Commands">
     <p>
-      In addition the the commands described above there a few meta directives
+      In addition to the commands described above there are a few meta directives
       supported by the command line interpreter.
     </p>
     <option>
@@ -311,11 +321,6 @@ USA.
       <optdesc><p>Enable (resp. disable) that following failing commands will
       cancel the execution of the current script file. This is a ignored when
       used on the interactive command line.</p></optdesc>
-    </option>
-
-    <option>
-      <p><opt>.verbose</opt> and <opt>.noverbose</opt></p>
-      <optdesc><p>Enable (resp. disable) extra verbosity.</p></optdesc>
     </option>
   </section>
 

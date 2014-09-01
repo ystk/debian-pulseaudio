@@ -36,21 +36,23 @@ typedef struct pa_device_port pa_device_port;
 #include <pulsecore/object.h>
 #include <pulsecore/hashmap.h>
 #include <pulsecore/core.h>
+#include <pulsecore/card.h>
 
 struct pa_device_port {
     pa_object parent; /* Needed for reference counting */
     pa_core *core;
+    pa_card *card;
 
     char *name;
     char *description;
 
     unsigned priority;
-    pa_port_available_t available;         /* PA_PORT_AVAILABLE_UNKNOWN, PA_PORT_AVAILABLE_NO or PA_PORT_AVAILABLE_YES */
+    pa_available_t available;         /* PA_AVAILABLE_UNKNOWN, PA_AVAILABLE_NO or PA_AVAILABLE_YES */
 
     pa_proplist *proplist;
-    pa_hashmap *profiles; /* Can be NULL. Does not own the profiles */
-    pa_bool_t is_input:1;
-    pa_bool_t is_output:1;
+    pa_hashmap *profiles; /* Does not own the profiles */
+    pa_direction_t direction;
+    int64_t latency_offset;
 
     /* .. followed by some implementation specific data */
 };
@@ -60,11 +62,25 @@ PA_DECLARE_PUBLIC_CLASS(pa_device_port);
 
 #define PA_DEVICE_PORT_DATA(d) ((void*) ((uint8_t*) d + PA_ALIGN(sizeof(pa_device_port))))
 
-pa_device_port *pa_device_port_new(pa_core *c, const char *name, const char *description, size_t extra);
+typedef struct pa_device_port_new_data {
+    char *name;
+    char *description;
+    pa_available_t available;
+    pa_direction_t direction;
+} pa_device_port_new_data;
 
-void pa_device_port_hashmap_free(pa_hashmap *h);
+pa_device_port_new_data *pa_device_port_new_data_init(pa_device_port_new_data *data);
+void pa_device_port_new_data_set_name(pa_device_port_new_data *data, const char *name);
+void pa_device_port_new_data_set_description(pa_device_port_new_data *data, const char *description);
+void pa_device_port_new_data_set_available(pa_device_port_new_data *data, pa_available_t available);
+void pa_device_port_new_data_set_direction(pa_device_port_new_data *data, pa_direction_t direction);
+void pa_device_port_new_data_done(pa_device_port_new_data *data);
+
+pa_device_port *pa_device_port_new(pa_core *c, pa_device_port_new_data *data, size_t extra);
 
 /* The port's available status has changed */
-void pa_device_port_set_available(pa_device_port *p, pa_port_available_t available);
+void pa_device_port_set_available(pa_device_port *p, pa_available_t available);
+
+void pa_device_port_set_latency_offset(pa_device_port *p, int64_t offset);
 
 #endif

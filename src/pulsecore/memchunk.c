@@ -83,7 +83,7 @@ pa_memchunk *pa_memchunk_will_need(const pa_memchunk *c) {
     /* A version of pa_memblock_will_need() that works on memchunks
      * instead of memblocks */
 
-    p = (uint8_t*) pa_memblock_acquire(c->memblock) + c->index;
+    p = pa_memblock_acquire_chunk(c);
     pa_will_need(p, c->length);
     pa_memblock_release(c->memblock);
 
@@ -110,7 +110,7 @@ pa_memchunk* pa_memchunk_memcpy(pa_memchunk *dst, pa_memchunk *src) {
     return dst;
 }
 
-pa_bool_t pa_memchunk_isset(pa_memchunk *chunk) {
+bool pa_memchunk_isset(pa_memchunk *chunk) {
     assert(chunk);
 
     return

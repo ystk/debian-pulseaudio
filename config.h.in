@@ -29,10 +29,8 @@
 /* Legacy database entry format */
 #undef ENABLE_LEGACY_DATABASE_ENTRY_FORMAT
 
-/* Legacy runtime dir */
-#undef ENABLE_LEGACY_RUNTIME_DIR
-
-/* always defined to indicate that i18n is enabled */
+/* Define to 1 if translation of program messages to the user's native
+   language is requested. */
 #undef ENABLE_NLS
 
 /* Define to the type of elements in the array set by `getgroups'. Usually
@@ -55,6 +53,9 @@
 /* Have ALSA? */
 #undef HAVE_ALSA
 
+/* Have ALSA UCM? */
+#undef HAVE_ALSA_UCM
+
 /* Have ARMv6 instructions. */
 #undef HAVE_ARMV6
 
@@ -67,11 +68,16 @@
 /* Define to 1 if you have the <atomic_ops.h> header file. */
 #undef HAVE_ATOMIC_OPS_H
 
-/* Define to 1 if you have the `bind_textdomain_codeset' function. */
-#undef HAVE_BIND_TEXTDOMAIN_CODESET
-
 /* Define to 1 if you have the <byteswap.h> header file. */
 #undef HAVE_BYTESWAP_H
+
+/* Define to 1 if you have the MacOS X function CFLocaleCopyCurrent in the
+   CoreFoundation framework. */
+#undef HAVE_CFLOCALECOPYCURRENT
+
+/* Define to 1 if you have the MacOS X function CFPreferencesCopyAppValue in
+   the CoreFoundation framework. */
+#undef HAVE_CFPREFERENCESCOPYAPPVALUE
 
 /* Define to 1 if you have the `chmod' function. */
 #undef HAVE_CHMOD
@@ -94,7 +100,8 @@
 /* Define to 1 if you have the `dbus_watch_get_unix_fd' function. */
 #undef HAVE_DBUS_WATCH_GET_UNIX_FD
 
-/* Define to 1 if you have the `dcgettext' function. */
+/* Define if the GNU dcgettext() function is already present or preinstalled.
+   */
 #undef HAVE_DCGETTEXT
 
 /* Define to 1 if you have the declaration of `environ', and to 0 if you
@@ -167,9 +174,6 @@
 /* Have GTK? */
 #undef HAVE_GTK
 
-/* Have HAL. */
-#undef HAVE_HAL
-
 /* Have HAL compatibility. */
 #undef HAVE_HAL_COMPAT
 
@@ -182,11 +186,11 @@
 /* Define this to enable IPv6 connection support */
 #undef HAVE_IPV6
 
+/* Have JOURNAL? */
+#undef HAVE_JOURNAL
+
 /* Define to 1 if you have the <langinfo.h> header file. */
 #undef HAVE_LANGINFO_H
-
-/* Define if your <locale.h> file defines LC_MESSAGES. */
-#undef HAVE_LC_MESSAGES
 
 /* Have libasyncns? */
 #undef HAVE_LIBASYNCNS
@@ -209,9 +213,6 @@
 /* Define to 1 if you have the <linux/sockios.h> header file. */
 #undef HAVE_LINUX_SOCKIOS_H
 
-/* Define to 1 if you have the <locale.h> header file. */
-#undef HAVE_LOCALE_H
-
 /* Define to 1 if you have the `lrintf' function. */
 #undef HAVE_LRINTF
 
@@ -232,6 +233,9 @@
 
 /* Define to 1 if you have the `nanosleep' function. */
 #undef HAVE_NANOSLEEP
+
+/* Have NEON support? */
+#undef HAVE_NEON
 
 /* Define to 1 if you have the <netdb.h> header file. */
 #undef HAVE_NETDB_H
@@ -476,6 +480,9 @@
 /* Define to 1 if you have the <unistd.h> header file. */
 #undef HAVE_UNISTD_H
 
+/* Define to 1 if you have the <use-case.h> header file. */
+#undef HAVE_USE_CASE_H
+
 /* Define to 1 if you have the `usleep' function. */
 #undef HAVE_USLEEP
 
@@ -509,6 +516,11 @@
 /* Have X11? */
 #undef HAVE_X11
 
+/* Define to 1 if you have the
+   </System/Library/Frameworks/CoreServices.framework/Headers/CoreServices.h>
+   header file. */
+#undef HAVE__SYSTEM_LIBRARY_FRAMEWORKS_CORESERVICES_FRAMEWORK_HEADERS_CORESERVICES_H
+
 /* Define as const if the declaration of iconv() needs const. */
 #undef ICONV_CONST
 
@@ -518,9 +530,6 @@
 /* Define to the sub-directory in which libtool stores uninstalled libraries.
    */
 #undef LT_OBJDIR
-
-/* Define to 1 if your C compiler doesn't accept -c and -o together. */
-#undef NO_MINUS_C_MINUS_O
 
 /* Build target is Darwin. */
 #undef OS_IS_DARWIN
@@ -558,9 +567,6 @@
 /* Location of pulseaudio binary */
 #undef PA_BINARY
 
-/* Location of uninstalled binaries */
-#undef PA_BUILDDIR
-
 /* The CFLAGS used during compilation */
 #undef PA_CFLAGS
 
@@ -581,6 +587,9 @@
 
 /* Fallback machine-id file */
 #undef PA_MACHINE_ID_FALLBACK
+
+/* Shared object extension */
+#undef PA_SOEXT
 
 /* System config dir */
 #undef PA_SYSTEM_CONFIG_PATH

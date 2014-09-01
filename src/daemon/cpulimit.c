@@ -80,7 +80,7 @@ static pa_io_event *io_event = NULL;
 static struct sigaction sigaction_prev;
 
 /* Nonzero after pa_cpu_limit_init() */
-static pa_bool_t installed = FALSE;
+static bool installed = false;
 
 /* The current state of operation */
 static enum {
@@ -167,7 +167,7 @@ static void callback(pa_mainloop_api*m, pa_io_event*e, int fd, pa_io_event_flags
 
     pa_log("Received request to terminate due to CPU overload.");
 
-    pa_read(the_pipe[0], &c, sizeof(c), NULL);
+    (void) pa_read(the_pipe[0], &c, sizeof(c), NULL);
     m->quit(m, 1); /* Quit the main loop */
 }
 
@@ -209,7 +209,7 @@ int pa_cpu_limit_init(pa_mainloop_api *m) {
         return -1;
     }
 
-    installed = TRUE;
+    installed = true;
 
     reset_cpu_time(CPUTIME_INTERVAL_SOFT);
 
@@ -230,7 +230,7 @@ void pa_cpu_limit_done(void) {
 
     if (installed) {
         pa_assert_se(sigaction(SIGXCPU, &sigaction_prev, NULL) >= 0);
-        installed = FALSE;
+        installed = false;
     }
 }
 

@@ -44,7 +44,7 @@
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("Position event sounds between L and R depending on the position on screen of the widget triggering them.");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_LOAD_ONCE(true);
 
 static const char* const valid_modargs[] = {
     NULL
@@ -52,6 +52,7 @@ static const char* const valid_modargs[] = {
 
 struct userdata {
     pa_hook_slot *sink_input_fixate_hook_slot;
+    const char *name;
 };
 
 static int parse_pos(const char *pos, double *f) {
@@ -73,7 +74,7 @@ static int parse_pos(const char *pos, double *f) {
 static pa_hook_result_t sink_input_fixate_hook_callback(pa_core *core, pa_sink_input_new_data *data, struct userdata *u) {
     const char *hpos, *vpos, *role, *id;
     double f;
-    char t[PA_CVOLUME_SNPRINT_MAX];
+    char t[PA_CVOLUME_SNPRINT_VERBOSE_MAX];
     pa_cvolume v;
 
     pa_assert(data);
@@ -131,14 +132,19 @@ static pa_hook_result_t sink_input_fixate_hook_callback(pa_core *core, pa_sink_i
         }
     }
 
-    pa_log_debug("Final volume factor %s.", pa_cvolume_snprint(t, sizeof(t), &v));
-    pa_sink_input_new_data_apply_volume_factor_sink(data, &v);
+    pa_log_debug("Final volume factor %s.",
+                 pa_cvolume_snprint_verbose(t,
+                                            sizeof(t),
+                                            &v,
+                                            &data->sink->channel_map,
+                                            data->sink->flags & PA_SINK_DECIBEL_VOLUME));
+    pa_sink_input_new_data_add_volume_factor_sink(data, u->name, &v);
 
     return PA_HOOK_OK;
 }
 
 int pa__init(pa_module*m) {
-    pa_modargs *ma = NULL;
+    pa_modargs *ma;
     struct userdata *u;
 
     pa_assert(m);
@@ -152,14 +158,12 @@ int pa__init(pa_module*m) {
     u->sink_input_fixate_hook_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_INPUT_FIXATE], PA_HOOK_EARLY, (pa_hook_cb_t) sink_input_fixate_hook_callback, u);
 
     pa_modargs_free(ma);
+    u->name = m->name;
 
     return 0;
 
 fail:
     pa__done(m);
-
-    if (ma)
-        pa_modargs_free(ma);
 
     return -1;
 }

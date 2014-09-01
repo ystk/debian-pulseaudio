@@ -36,22 +36,25 @@
 #include <pulsecore/core-util.h>
 #include <pulsecore/namereg.h>
 #include <pulsecore/ratelimit.h>
+#include <pulsecore/strbuf.h>
 
 #include "module-udev-detect-symdef.h"
 
 PA_MODULE_AUTHOR("Lennart Poettering");
 PA_MODULE_DESCRIPTION("Detect available audio hardware and load matching drivers");
 PA_MODULE_VERSION(PACKAGE_VERSION);
-PA_MODULE_LOAD_ONCE(TRUE);
+PA_MODULE_LOAD_ONCE(true);
 PA_MODULE_USAGE(
         "tsched=<enable system timer based scheduling mode?> "
+        "tsched_buffer_size=<buffer size when using timer based scheduling> "
         "fixed_latency_range=<disable latency range changes on underrun?> "
         "ignore_dB=<ignore dB information from the device?> "
-        "deferred_volume=<syncronize sw and hw volume changes in IO-thread?>");
+        "deferred_volume=<syncronize sw and hw volume changes in IO-thread?> "
+        "use_ucm=<use ALSA UCM for card configuration?>");
 
 struct device {
     char *path;
-    pa_bool_t need_verify;
+    bool need_verify;
     char *card_name;
     char *args;
     uint32_t module;
@@ -62,10 +65,14 @@ struct userdata {
     pa_core *core;
     pa_hashmap *devices;
 
-    pa_bool_t use_tsched:1;
-    pa_bool_t fixed_latency_range:1;
-    pa_bool_t ignore_dB:1;
-    pa_bool_t deferred_volume:1;
+    bool use_tsched:1;
+    bool tsched_buffer_size_valid:1;
+    bool fixed_latency_range:1;
+    bool ignore_dB:1;
+    bool deferred_volume:1;
+    bool use_ucm:1;
+
+    uint32_t tsched_buffer_size;
 
     struct udev* udev;
     struct udev_monitor *monitor;
@@ -77,9 +84,11 @@ struct userdata {
 
 static const char* const valid_modargs[] = {
     "tsched",
+    "tsched_buffer_size",
     "fixed_latency_range",
     "ignore_dB",
     "deferred_volume",
+    "use_ucm",
     NULL
 };
 
@@ -123,7 +132,7 @@ static char *card_get_sysattr(const char *card_idx, const char *name) {
         goto finish;
     }
 
-    t = pa_sprintf_malloc("%s/class/sound/card%s", udev_get_sys_path(udev), card_idx);
+    t = pa_sprintf_malloc("/sys/class/sound/card%s", card_idx);
     card = udev_device_new_from_syspath(udev, t);
     pa_xfree(t);
 
@@ -146,9 +155,9 @@ finish:
     return r;
 }
 
-static pa_bool_t pcm_is_modem(const char *card_idx, const char *pcm) {
+static bool pcm_is_modem(const char *card_idx, const char *pcm) {
     char *sysfs_path, *pcm_class;
-    pa_bool_t is_modem;
+    bool is_modem;
 
     pa_assert(card_idx);
     pa_assert(pcm);
@@ -166,13 +175,13 @@ static pa_bool_t pcm_is_modem(const char *card_idx, const char *pcm) {
     return is_modem;
 }
 
-static pa_bool_t is_card_busy(const char *id) {
+static bool is_card_busy(const char *id) {
     char *card_path = NULL, *pcm_path = NULL, *sub_status = NULL;
     DIR *card_dir = NULL, *pcm_dir = NULL;
     FILE *status_file = NULL;
     size_t len;
     struct dirent *space = NULL, *de;
-    pa_bool_t busy = FALSE;
+    bool busy = false;
     int r;
 
     pa_assert(id);
@@ -249,7 +258,7 @@ static pa_bool_t is_card_busy(const char *id) {
             }
 
             if (!pa_streq(line, "closed\n")) {
-                busy = TRUE;
+                busy = true;
                 break;
             }
         }
@@ -277,12 +286,12 @@ fail:
 static void verify_access(struct userdata *u, struct device *d) {
     char *cd;
     pa_card *card;
-    pa_bool_t accessible;
+    bool accessible;
 
     pa_assert(u);
     pa_assert(d);
 
-    cd = pa_sprintf_malloc("%s/snd/controlC%s", udev_get_dev_path(u->udev), path_get_card_id(d->path));
+    cd = pa_sprintf_malloc("/dev/snd/controlC%s", path_get_card_id(d->path));
     accessible = access(cd, R_OK|W_OK) >= 0;
     pa_log_debug("%s is accessible: %s", cd, pa_yes_no(accessible));
 
@@ -294,7 +303,7 @@ static void verify_access(struct userdata *u, struct device *d) {
 
         if (accessible) {
             pa_module *m;
-            pa_bool_t busy;
+            bool busy;
 
             /* Check if any of the PCM devices that belong to this
              * card are currently busy. If they are, don't try to load
@@ -350,8 +359,10 @@ static void verify_access(struct userdata *u, struct device *d) {
         /* If we are already loaded update suspend status with
          * accessible boolean */
 
-        if ((card = pa_namereg_get(u->core, d->card_name, PA_NAMEREG_CARD)))
+        if ((card = pa_namereg_get(u->core, d->card_name, PA_NAMEREG_CARD))) {
+            pa_log_debug("%s all sinks and sources of card %s.", accessible ? "Resuming" : "Suspending", d->card_name);
             pa_card_suspend(card, !accessible, PA_SUSPEND_SESSION);
+        }
     }
 }
 
@@ -360,6 +371,7 @@ static void card_changed(struct userdata *u, struct udev_device *dev) {
     const char *path;
     const char *t;
     char *n;
+    pa_strbuf *args_buf;
 
     pa_assert(u);
     pa_assert(dev);
@@ -386,23 +398,32 @@ static void card_changed(struct userdata *u, struct udev_device *dev) {
 
     n = pa_namereg_make_valid_name(t);
     d->card_name = pa_sprintf_malloc("alsa_card.%s", n);
-    d->args = pa_sprintf_malloc("device_id=\"%s\" "
-                                "name=\"%s\" "
-                                "card_name=\"%s\" "
-                                "namereg_fail=false "
-                                "tsched=%s "
-                                "fixed_latency_range=%s "
-                                "ignore_dB=%s "
-                                "deferred_volume=%s "
-                                "card_properties=\"module-udev-detect.discovered=1\"",
-                                path_get_card_id(path),
-                                n,
-                                d->card_name,
-                                pa_yes_no(u->use_tsched),
-                                pa_yes_no(u->fixed_latency_range),
-                                pa_yes_no(u->ignore_dB),
-                                pa_yes_no(u->deferred_volume));
+    args_buf = pa_strbuf_new();
+    pa_strbuf_printf(args_buf,
+                     "device_id=\"%s\" "
+                     "name=\"%s\" "
+                     "card_name=\"%s\" "
+                     "namereg_fail=false "
+                     "tsched=%s "
+                     "fixed_latency_range=%s "
+                     "ignore_dB=%s "
+                     "deferred_volume=%s "
+                     "use_ucm=%s "
+                     "card_properties=\"module-udev-detect.discovered=1\"",
+                     path_get_card_id(path),
+                     n,
+                     d->card_name,
+                     pa_yes_no(u->use_tsched),
+                     pa_yes_no(u->fixed_latency_range),
+                     pa_yes_no(u->ignore_dB),
+                     pa_yes_no(u->deferred_volume),
+                     pa_yes_no(u->use_ucm));
     pa_xfree(n);
+
+    if (u->tsched_buffer_size_valid)
+        pa_strbuf_printf(args_buf, " tsched_buffer_size=%" PRIu32, u->tsched_buffer_size);
+
+    d->args = pa_strbuf_tostring_free(args_buf);
 
     pa_hashmap_put(u->devices, d->path, d);
 
@@ -421,7 +442,7 @@ static void remove_card(struct userdata *u, struct udev_device *dev) {
     pa_log_info("Card %s removed.", d->path);
 
     if (d->module != PA_INVALID_INDEX)
-        pa_module_unload_request_by_index(u->core, d->module, TRUE);
+        pa_module_unload_request_by_index(u->core, d->module, true);
 
     device_free(d);
 }
@@ -500,12 +521,12 @@ fail:
     u->udev_io = NULL;
 }
 
-static pa_bool_t pcm_node_belongs_to_device(
+static bool pcm_node_belongs_to_device(
         struct device *d,
         const char *node) {
 
     char *cd;
-    pa_bool_t b;
+    bool b;
 
     cd = pa_sprintf_malloc("pcmC%sD", path_get_card_id(d->path));
     b = pa_startswith(node, cd);
@@ -514,12 +535,12 @@ static pa_bool_t pcm_node_belongs_to_device(
     return b;
 }
 
-static pa_bool_t control_node_belongs_to_device(
+static bool control_node_belongs_to_device(
         struct device *d,
         const char *node) {
 
     char *cd;
-    pa_bool_t b;
+    bool b;
 
     cd = pa_sprintf_malloc("controlC%s", path_get_card_id(d->path));
     b = pa_streq(node, cd);
@@ -541,7 +562,7 @@ static void inotify_cb(
     } buf;
     struct userdata *u = userdata;
     static int type = 0;
-    pa_bool_t deleted = FALSE;
+    bool deleted = false;
     struct device *d;
     void *state;
 
@@ -581,18 +602,18 @@ static void inotify_cb(
             if (((event->mask & IN_ATTRIB) && pa_startswith(event->name, "controlC")))
                 PA_HASHMAP_FOREACH(d, u->devices, state)
                     if (control_node_belongs_to_device(d, event->name))
-                        d->need_verify = TRUE;
+                        d->need_verify = true;
 
             /* ALSA doesn't really give us any guarantee on the closing
              * order, so let's simply hope */
             if (((event->mask & IN_CLOSE_WRITE) && pa_startswith(event->name, "pcmC")))
                 PA_HASHMAP_FOREACH(d, u->devices, state)
                     if (pcm_node_belongs_to_device(d, event->name))
-                        d->need_verify = TRUE;
+                        d->need_verify = true;
 
             /* /dev/snd/ might have been removed */
             if ((event->mask & (IN_DELETE_SELF|IN_MOVE_SELF)))
-                deleted = TRUE;
+                deleted = true;
 
             event = (struct inotify_event*) ((uint8_t*) event + len);
             r -= len;
@@ -601,7 +622,7 @@ static void inotify_cb(
 
     PA_HASHMAP_FOREACH(d, u->devices, state)
         if (d->need_verify) {
-            d->need_verify = FALSE;
+            d->need_verify = false;
             verify_access(u, d);
         }
 
@@ -621,7 +642,6 @@ fail:
 }
 
 static int setup_inotify(struct userdata *u) {
-    char *dev_snd;
     int r;
 
     if (u->inotify_fd >= 0)
@@ -632,9 +652,7 @@ static int setup_inotify(struct userdata *u) {
         return -1;
     }
 
-    dev_snd = pa_sprintf_malloc("%s/snd", udev_get_dev_path(u->udev));
-    r = inotify_add_watch(u->inotify_fd, dev_snd, IN_ATTRIB|IN_CLOSE_WRITE|IN_DELETE_SELF|IN_MOVE_SELF);
-    pa_xfree(dev_snd);
+    r = inotify_add_watch(u->inotify_fd, "/dev/snd", IN_ATTRIB|IN_CLOSE_WRITE|IN_DELETE_SELF|IN_MOVE_SELF);
 
     if (r < 0) {
         int saved_errno = errno;
@@ -670,8 +688,8 @@ int pa__init(pa_module *m) {
     struct udev_enumerate *enumerate = NULL;
     struct udev_list_entry *item = NULL, *first = NULL;
     int fd;
-    pa_bool_t use_tsched = TRUE, fixed_latency_range = FALSE, ignore_dB = FALSE, deferred_volume = m->core->deferred_volume;
-
+    bool use_tsched = true, fixed_latency_range = false, ignore_dB = false, deferred_volume = m->core->deferred_volume;
+    bool use_ucm = true;
 
     pa_assert(m);
 
@@ -682,7 +700,7 @@ int pa__init(pa_module *m) {
 
     m->userdata = u = pa_xnew0(struct userdata, 1);
     u->core = m->core;
-    u->devices = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+    u->devices = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) device_free);
     u->inotify_fd = -1;
 
     if (pa_modargs_get_value_boolean(ma, "tsched", &use_tsched) < 0) {
@@ -690,6 +708,15 @@ int pa__init(pa_module *m) {
         goto fail;
     }
     u->use_tsched = use_tsched;
+
+    if (pa_modargs_get_value(ma, "tsched_buffer_size", NULL)) {
+        if (pa_modargs_get_value_u32(ma, "tsched_buffer_size", &u->tsched_buffer_size) < 0) {
+            pa_log("Failed to parse tsched_buffer_size= argument.");
+            goto fail;
+        }
+
+        u->tsched_buffer_size_valid = true;
+    }
 
     if (pa_modargs_get_value_boolean(ma, "fixed_latency_range", &fixed_latency_range) < 0) {
         pa_log("Failed to parse fixed_latency_range= argument.");
@@ -708,6 +735,12 @@ int pa__init(pa_module *m) {
         goto fail;
     }
     u->deferred_volume = deferred_volume;
+
+    if (pa_modargs_get_value_boolean(ma, "use_ucm", &use_ucm) < 0) {
+        pa_log("Failed to parse use_ucm= argument.");
+        goto fail;
+    }
+    u->use_ucm = use_ucm;
 
     if (!(u->udev = udev_new())) {
         pa_log("Failed to initialize udev library.");
@@ -807,14 +840,8 @@ void pa__done(pa_module *m) {
     if (u->inotify_fd >= 0)
         pa_close(u->inotify_fd);
 
-    if (u->devices) {
-        struct device *d;
-
-        while ((d = pa_hashmap_steal_first(u->devices)))
-            device_free(d);
-
-        pa_hashmap_free(u->devices, NULL, NULL);
-    }
+    if (u->devices)
+        pa_hashmap_free(u->devices);
 
     pa_xfree(u);
 }

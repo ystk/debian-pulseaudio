@@ -84,6 +84,12 @@ USA.
     </option>
 
     <option>
+      <p><opt>--monitor-stream</opt><arg>=INDEX</arg></p>
+
+      <optdesc><p>Record from the sink input with index INDEX.</p></optdesc>
+    </option>
+
+    <option>
       <p><opt>-n | --client-name</opt><arg>=NAME</arg></p>
 
       <optdesc><p>Specify the client name <file>paplay</file> shall pass to the server when connecting.</p></optdesc>
@@ -116,7 +122,7 @@ USA.
       <opt>float32le</opt>, <opt>float32be</opt>, <opt>ulaw</opt>,
       <opt>alaw</opt>, <opt>s32le</opt>, <opt>s32be</opt>,
       <opt>s24le</opt>, <opt>s24be</opt>, <opt>s24-32le</opt>,
-      <opt>s24-32be</opt>. Depending on the endianess of the CPU the
+      <opt>s24-32be</opt>. Depending on the endianness of the CPU the
       formats <opt>s16ne</opt>, <opt>s16re</opt>, <opt>s32ne</opt>,
       <opt>s32re</opt>, <opt>float32ne</opt>, <opt>float32re</opt>,
       <opt>s32ne</opt>, <opt>s32re</opt>, <opt>s24ne</opt>,
@@ -189,7 +195,7 @@ USA.
     <option>
       <p><opt>--latency-msec</opt><arg>=MSEC</arg></p>
       <optdesc><p>Explicitly configure the latency, with a time
-      specified in miliseconds. If left out the server will pick the
+      specified in milliseconds. If left out the server will pick the
       latency, usually relatively high for power saving reasons. Use
       either this option or <opt>--latency</opt>, but not
       both.</p></optdesc>
